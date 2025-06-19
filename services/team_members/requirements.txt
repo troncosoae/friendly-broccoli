@@ -1,0 +1,4 @@
+# services/team_members_service/requirements.txt
+fastapi==0.111.0
+uvicorn==0.30.1
+pydantic==2.7.4
