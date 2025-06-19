@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
+from enum import Enum
 from typing import List, Dict
 import uuid
 
@@ -15,10 +16,25 @@ app = FastAPI(
 # In a real application, replace this with a persistent database (e.g., PostgreSQL, MongoDB, Firestore)
 db: Dict[str, dict] = {}
 
+class Position(str, Enum):
+    FORWARD = "Forward"
+    DEFENDER = "Defender"
+    MIDFIELDER = "Midfielder"
+    GOALKEEPER = "Goalkeeper"
+
+    def __str__(self):
+        return self.value
+    def __repr__(self):
+        return self.value
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return self.value == other
+        return super().__eq__(other)
+
 # Pydantic models for request and response validation
 class TeamMemberBase(BaseModel):
     name: str
-    position: str
+    position: Position
     contact_info: str = None
 
 class TeamMemberCreate(TeamMemberBase):
@@ -26,7 +42,7 @@ class TeamMemberCreate(TeamMemberBase):
 
 class TeamMemberUpdate(TeamMemberBase):
     name: str = None
-    position: str = None
+    position: Position = None
     contact_info: str = None
 
 class TeamMemberInDB(TeamMemberBase):
