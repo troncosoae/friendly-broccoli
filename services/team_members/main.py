@@ -1,16 +1,29 @@
-# services/team_members_service/main.py
-
-from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel
 from enum import Enum
+import os
 from typing import List, Dict
 import uuid
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, status
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel
+
+# Load environment variables
+load_dotenv()
+
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+DB_NAME = os.getenv("DB_NAME", "team_admin")
+COLLECTION = "team_members"
 
 # Initialize FastAPI app
 app = FastAPI(
     title="Team Members Service",
     description="Manages team member information."
 )
+
+client = AsyncIOMotorClient(MONGODB_URI)
+mg_db = client[DB_NAME]
+team_members_collection = mg_db[COLLECTION]
 
 # In-memory database for demonstration purposes
 # In a real application, replace this with a persistent database (e.g., PostgreSQL, MongoDB, Firestore)
@@ -56,6 +69,7 @@ async def startup_event():
     member_id_2 = str(uuid.uuid4())
     db[member_id_2] = {"id": member_id_2, "name": "Bob Smith", "position": "Defender", "contact_info": "bob@example.com"}
     print(f"Team Members Service started. Initial members: {len(db)}")
+    print(f"Connecing to database at {MONGODB_URI} with DB name {DB_NAME} and collection {COLLECTION}")
 
 
 @app.get("/")
@@ -76,9 +90,14 @@ async def create_team_member(member: TeamMemberCreate):
     member_id = str(uuid.uuid4())
     member_data = member.model_dump()
     member_data["id"] = member_id
-    db[member_id] = member_data
-    print(f"Created member: {member_data['name']} with ID: {member_id}")
+    print(member_data)
+    await team_members_collection.insert_one(member_data)
+    print(member_data)
+    # TODO: Check that it was inserte correctly
     return TeamMemberInDB(**member_data)
+    # db[member_id] = member_data
+    # print(f"Created member: {member_data['name']} with ID: {member_id}")
+    # return TeamMemberInDB(**member_data)
 
 @app.get("/members", response_model=List[TeamMemberInDB],
           summary="Get all team members",
