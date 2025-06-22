@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import Enum
 import os
 from typing import List, Dict
@@ -6,7 +7,7 @@ import uuid
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 # Load environment variables
 load_dotenv()
@@ -47,16 +48,20 @@ class Position(str, Enum):
 # Pydantic models for request and response validation
 class TeamMemberBase(BaseModel):
     name: str
-    position: Position
-    contact_info: str = None
+    email: EmailStr # Unique
+    phone: str # Unique
+    date_of_birth: datetime
+    date_joined: datetime
 
 class TeamMemberCreate(TeamMemberBase):
     pass
 
 class TeamMemberUpdate(TeamMemberBase):
-    name: str = None
-    position: Position = None
-    contact_info: str = None
+    name: str
+    email: EmailStr # Unique
+    phone: str # Unique
+    date_of_birth: datetime
+    date_joined: datetime
 
 class TeamMemberInDB(TeamMemberBase):
     id: str
@@ -90,14 +95,26 @@ async def create_team_member(member: TeamMemberCreate):
     member_id = str(uuid.uuid4())
     member_data = member.model_dump()
     member_data["id"] = member_id
+
     print(member_data)
+
+    # Make sure the phone and email haven't yet been inserted
+    equal_phone_member = await team_members_collection.find_one({"phone": member_data["phone"]})
+    print(equal_phone_member, flush=True)
+    if equal_phone_member is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A team member with this phone already exists.")
+    equal_email_member = await team_members_collection.find_one({"email": member_data["email"]})
+    print(equal_email_member, flush=True)
+    if equal_email_member is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A team member with this email already exists.")
+
     await team_members_collection.insert_one(member_data)
-    print(member_data)
-    # TODO: Check that it was inserte correctly
-    return TeamMemberInDB(**member_data)
-    # db[member_id] = member_data
-    # print(f"Created member: {member_data['name']} with ID: {member_id}")
-    # return TeamMemberInDB(**member_data)
+    member = await team_members_collection.find_one({"id": member_id})
+    return TeamMemberInDB(**member)
 
 @app.get("/members", response_model=List[TeamMemberInDB],
           summary="Get all team members",
@@ -106,7 +123,10 @@ async def get_all_team_members():
     """
     Retrieves all team members.
     """
-    return [TeamMemberInDB(**member) for member in db.values()]
+    members = await team_members_collection.find().to_list(length=None)
+    if len(members) > 100:
+        members = members[:100]  # Limit to 100 members for performance
+    return [TeamMemberInDB(**member) for member in members]
 
 @app.get("/members/{member_id}", response_model=TeamMemberInDB,
           summary="Get a team member by ID",
@@ -117,7 +137,7 @@ async def get_team_member(member_id: str):
 
     - **member_id**: The unique ID of the team member.
     """
-    member = db.get(member_id)
+    member = await team_members_collection.find_one({"id": member_id})
     if not member:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team member not found")
     return TeamMemberInDB(**member)
@@ -134,15 +154,41 @@ async def update_team_member(member_id: str, member_update: TeamMemberUpdate):
     - **position**: New position (optional).
     - **contact_info**: New contact details (optional).
     """
-    if member_id not in db:
+    member = await team_members_collection.find_one({"id": member_id})
+    if not member:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team member not found")
+    
+    # Make sure the phone and email haven't yet been inserted
+    equal_phone_member = await team_members_collection.find_one({
+        "phone": member["phone"],
+        "id": {"ne": member_id}})
+    print(equal_phone_member, flush=True)
+    if equal_phone_member is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A team member with this phone already exists.")
+    equal_email_member = await team_members_collection.find_one({
+        "email": member["email"],
+        "id": {"ne": member_id}})
+    print(equal_email_member, flush=True)
+    if equal_email_member is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A team member with this email already exists.")
+    
+    # Update the member data with the provided fields
+    member_data = member_update.model_dump(exclude_unset=True)
+    member_data["id"] = member_id  # Ensure the ID remains the same
+    member = await team_members_collection.find_one_and_update(
+        {"id": member_id},
+        {"$set": member_data},
+        return_document=True
+    )
 
-    current_member = db[member_id]
-    updated_data = member_update.model_dump(exclude_unset=True)
-    current_member.update(updated_data)
-    db[member_id] = current_member
+    if not member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team member not found")
     print(f"Updated member ID: {member_id}")
-    return TeamMemberInDB(**current_member)
+    return TeamMemberInDB(**member)
 
 @app.delete("/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT,
             summary="Delete a team member",
@@ -153,9 +199,11 @@ async def delete_team_member(member_id: str):
 
     - **member_id**: The unique ID of the team member to delete.
     """
-    if member_id in db:
-        del db[member_id]
-        print(f"Deleted member ID: {member_id}")
-        return
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team member not found")
-
+    member = await team_members_collection.find_one({"id": member_id})
+    if not member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team member not found")
+    # Delete the member from the database
+    result = await team_members_collection.delete_one({"id": member_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team member not found")
+    return TeamMemberInDB(**member)
