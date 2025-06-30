@@ -5,12 +5,15 @@ from enum import Enum
 import os
 from typing import List, Dict
 import uuid
+import asyncio # Import asyncio for running tasks concurrently
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, root_validator
 import httpx # Import httpx for making HTTP requests to other services
+import base64 # For base64 encoding the email message
+from email.message import EmailMessage # For constructing the email
 
 # Load environment variables
 load_dotenv()
@@ -22,6 +25,22 @@ COLLECTION = "ball_collectors" # Collection name for ball collector assignments
 # URL for the Team Members Service (as defined in docker-compose.yml)
 # This will be used for inter-service communication
 TEAM_MEMBERS_SERVICE_URL = os.getenv("TEAM_MEMBERS_SERVICE_URL", "http://team_members_api:80")
+
+# Gmail API details (for demonstration purposes)
+# In a real application, you would use proper OAuth 2.0 authentication
+# and securely manage credentials. This 'API_KEY' is a placeholder.
+# You would typically have a Google Cloud Project, enable Gmail API,
+# and configure OAuth 2.0 credentials (e.g., a service account with domain-wide delegation
+# for server-to-server interaction, or a web application flow for user consent).
+GMAIL_API_URL = "https://www.googleapis.com/gmail/v1/users/me/messages/send"
+# The 'from' email address must be an authorized sender for your Gmail API credentials.
+# For simplicity, we'll use a placeholder. In production, this would be tied to your OAuth setup.
+EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "your-email@example.com") 
+# Placeholder for a valid Google access token obtained via OAuth 2.0.
+# THIS TOKEN IS TEMPORARY AND SHOULD NOT BE HARDCODED IN PRODUCTION.
+# It would typically be obtained via a secure OAuth flow and refreshed as needed.
+GOOGLE_ACCESS_TOKEN = os.getenv("GOOGLE_ACCESS_TOKEN", "YOUR_GOOGLE_ACCESS_TOKEN_HERE")
+
 
 VERSION = "1.0.0"
 
@@ -83,6 +102,49 @@ async def check_team_member_exists(member_id: str):
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"Could not connect to Team Members Service at {TEAM_MEMBERS_SERVICE_URL}: {e}"
             )
+
+# New helper function to send email via Gmail API
+async def send_email_via_gmail_api(to_email: str, subject: str, body: str, member_name: str = "Team Member"):
+    """
+    Sends an email using the Gmail API.
+
+    NOTE: This function demonstrates the API call structure.
+    For production, you need to properly handle OAuth 2.0 authentication
+    to get a valid GOOGLE_ACCESS_TOKEN. This token expires and needs to be refreshed.
+    """
+    if not GOOGLE_ACCESS_TOKEN or GOOGLE_ACCESS_TOKEN == "YOUR_GOOGLE_ACCESS_TOKEN_HERE":
+        print("Skipping email send: Google Access Token is not configured.")
+        return {"status": "skipped", "message": "Email sending skipped (no access token)"}
+
+    msg = EmailMessage()
+    msg['To'] = to_email
+    msg['From'] = EMAIL_FROM_ADDRESS
+    msg['Subject'] = subject
+    msg.set_content(body)
+
+    # Encode the email message in base64url format
+    encoded_message = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+    headers = {
+        "Authorization": f"Bearer {GOOGLE_ACCESS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "raw": encoded_message
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(GMAIL_API_URL, headers=headers, json=payload)
+            response.raise_for_status() # Raise an exception for HTTP errors
+            print(f"Email sent successfully to {to_email} for {member_name}.")
+            return {"status": "success", "message": f"Email sent to {to_email}"}
+        except httpx.HTTPStatusError as e:
+            print(f"Failed to send email to {to_email} for {member_name}: HTTP Error {e.response.status_code} - {e.response.text}")
+            return {"status": "error", "message": f"Failed to send email to {to_email}: {e.response.text}"}
+        except httpx.RequestError as e:
+            print(f"Failed to send email to {to_email} for {member_name}: Request Error - {e}")
+            return {"status": "error", "message": f"Failed to send email to {to_email}: {e}"}
 
 
 @app.on_event("startup")
@@ -250,7 +312,7 @@ async def send_ball_carrier_reminders():
     """
     Simulates sending reminders for the current week's ball collectors.
     This endpoint would typically be called by a scheduled job (e.g., Google Cloud Scheduler).
-    It now fetches assignments from MongoDB and attempts to verify member IDs.
+    It now fetches assignments from MongoDB and attempts to verify member IDs, and send emails.
     """
     current_collectors = await get_current_ball_collectors() # This now fetches from MongoDB and verifies members
 
@@ -258,20 +320,48 @@ async def send_ball_carrier_reminders():
         print("No ball collectors assigned for the current week. No reminders sent.")
         return {"message": "No ball collectors assigned for the current week. No reminders sent."}
 
-    # Extract member_ids for the reminder message
-    # And attempt to fetch actual member names from Team Members Service for a richer reminder
+    # Prepare reminder messages and gather email sending tasks
+    email_tasks = []
     reminder_details = []
+
     for assignment in current_collectors:
         try:
             member_info = await check_team_member_exists(assignment.member_id)
-            reminder_details.append(f"{member_info.get('name', 'Unknown Member')} (ID: {assignment.member_id})")
+            member_name = member_info.get('name', 'Unknown Member')
+            member_email = member_info.get('email') # Assuming your TeamMemberInDB model has 'email'
+            
+            if member_email:
+                subject = "Ball Collector Reminder: This Week's Assignment!"
+                body = (
+                    f"Hi {member_name},\n\n"
+                    f"This is a reminder that you are assigned as a ball collector for the week starting {assignment.assignment_date.strftime('%Y-%m-%d')}. "
+                    "Please ensure all responsibilities are met.\n\n"
+                    "Thank you,\n"
+                    "Your Team"
+                )
+                # Add email sending task to the list
+                email_tasks.append(send_email_via_gmail_api(member_email, subject, body, member_name))
+                reminder_details.append(f"{member_name} (ID: {assignment.member_id}, Email: {member_email})")
+            else:
+                print(f"Warning: Member {member_name} (ID: {assignment.member_id}) does not have an email address for reminders.")
+                reminder_details.append(f"{member_name} (ID: {assignment.member_id}, No Email)")
+
         except HTTPException as e:
             print(f"Could not retrieve info for member ID {assignment.member_id} for reminder: {e.detail}")
             reminder_details.append(f"Invalid Member (ID: {assignment.member_id})")
+    
+    # Run all email sending tasks concurrently
+    email_results = await asyncio.gather(*email_tasks, return_exceptions=True)
 
-    reminder_message = (
-        f"Reminder! This week's ball collectors are: {', '.join(reminder_details)}. "
-        "Please ensure all responsibilities are met!"
+    successful_emails = [res for res in email_results if isinstance(res, dict) and res.get("status") == "success"]
+    failed_emails = [res for res in email_results if not isinstance(res, dict) or res.get("status") != "success"]
+
+    message = (
+        f"Reminder simulation successful. {len(successful_emails)} emails attempted and {len(failed_emails)} failed. "
+        f"Details for current week's ball collectors: {', '.join(reminder_details)}."
     )
-    print(f"Simulating reminder sent: {reminder_message}")
-    return {"message": "Reminder simulation successful", "details": reminder_message}
+    if failed_emails:
+        message += f"\nFailed email details: {failed_emails}"
+
+    print(f"Simulating reminder sent: {message}")
+    return {"message": message}
