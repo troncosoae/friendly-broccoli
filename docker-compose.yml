@@ -1,0 +1,81 @@
+# docker-compose.yml
+# version: '3.8' # Specify the Docker Compose file format version
+
+services:
+  # MongoDB Database Service
+  mongodb:
+    image: mongo:latest # Use the latest official MongoDB image
+    container_name: mongodb_container # Optional: A custom name for the container
+    ports:
+      - "27017:27017" # Map host port 27017 to container port 27017
+    volumes:
+      - mongo_data:/data/db # Persist MongoDB data to a named volume
+    environment:
+      # Optional: Set MongoDB root username and password for production (highly recommended)
+      # MONGO_INITDB_ROOT_USERNAME: your_username
+      # MONGO_INITDB_ROOT_PASSWORD: your_password
+      TZ: America/Santiago # Set timezone for consistency, adjust if needed
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"] # Check if MongoDB is running
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s # Give MongoDB time to start before checking
+
+  # Team Members Service
+  team_members_service:
+    build:
+      context: ./services/team_members # Path to the Dockerfile for this service
+      dockerfile: Dockerfile
+    container_name: team_members_api # Optional: A custom name for the container
+    ports:
+      - "8000:80" # Map host port 8000 to container port 80 (where FastAPI runs)
+    environment:
+      # MONGODB_URI: mongodb://mongodb:27017 # Connect to the 'mongodb' service within the Docker network
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017} # Use environment variable or default to MongoDB service
+      DB_NAME: team_admin # Same DB name as in main.py
+      COLLECTION: team_members # Same collection name as in main.py
+      TZ: America/Santiago # Set timezone for consistency
+    depends_on:
+      mongodb:
+        condition: service_healthy # Ensure MongoDB is healthy before starting this service
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"] # Check if the FastAPI service is running
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s # Give the service time to start before checking
+    networks:
+      - app_network # Assign to a custom network
+
+  # Ball Collectors Service
+  ball_collectors_service:
+    build:
+      context: ./services/ball_collectors # Path to the Dockerfile for this service
+      dockerfile: Dockerfile
+    container_name: ball_collectors_api # Optional: A custom name for the container
+    ports:
+      - "8001:80" # Map host port 8001 to container port 80
+    environment:
+      # MONGODB_URI: mongodb://mongodb:27017 # Connect to the 'mongodb' service within the Docker network
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017}
+      DB_NAME: team_admin # Same DB name as in main.py
+      COLLECTION: ball_collectors # Same collection name as in main.py
+      TEAM_MEMBERS_SERVICE_URL: http://team_members_api:80 # Reference the team_members_service by its container name and internal port
+      TZ: America/Santiago # Set timezone for consistency
+    depends_on:
+      team_members_service:
+        condition: service_healthy # Ensure Team Members Service is healthy before starting this service
+      mongodb:
+        condition: service_healthy # Ensure MongoDB is healthy
+    networks:
+      - app_network # Assign to the same custom network
+
+# Define named volumes for data persistence
+volumes:
+  mongo_data: # This volume will store MongoDB data
+
+# Define custom networks
+networks:
+  app_network: # All services will communicate over this network
+    driver: bridge

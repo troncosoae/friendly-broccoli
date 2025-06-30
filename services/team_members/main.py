@@ -16,6 +16,8 @@ MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 DB_NAME = os.getenv("DB_NAME", "team_admin")
 COLLECTION = "team_members"
 
+VERSION = "1.0.0"
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Team Members Service",
@@ -80,6 +82,14 @@ async def startup_event():
 @app.get("/")
 async def root():
     return {"message": "Team Members Service is running!"}
+
+@app.get("/health", summary="Health Check",
+          description="Checks the health of the Team Members Service.")
+async def health_check():
+    """
+    Health check endpoint to verify the service is running.
+    """
+    return {"status": "ok", "service": "Team Members Service", "version": VERSION}
 
 @app.post("/members", response_model=TeamMemberInDB, status_code=status.HTTP_201_CREATED,
           summary="Create a new team member",

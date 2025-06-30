@@ -1,4 +1,4 @@
-# services/ball_carriers_service/main.py
+# services/ball_collectors/main.py
 
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
@@ -6,9 +6,11 @@ from typing import List, Dict
 import datetime
 import uuid
 
+VERSION = "1.0.0"
+
 # Initialize FastAPI app
 app = FastAPI(
-    title="Ball Carriers Service",
+    title="Ball Collectors Service",
     description="Manages weekly ball carrier assignments and sends reminders."
 )
 
@@ -36,12 +38,20 @@ async def startup_event():
     db[assignment_id_1] = {"id": assignment_id_1, "member_id": "member_id_alice", "assignment_date": today}
     assignment_id_2 = str(uuid.uuid4())
     db[assignment_id_2] = {"id": assignment_id_2, "member_id": "member_id_bob", "assignment_date": next_week}
-    print(f"Ball Carriers Service started. Initial assignments: {len(db)}")
+    print(f"Ball Collectors Service started. Initial assignments: {len(db)}")
 
 
 @app.get("/")
 async def root():
-    return {"message": "Ball Carriers Service is running!"}
+    return {"message": "Ball Collectors Service is running!"}
+
+@app.get("/health", summary="Health Check",
+            description="Checks the health of the Ball Collectors Service.")
+async def health_check():
+    """
+    Health check endpoint to verify the service is running.
+    """
+    return {"status": "ok", "service": "Ball Collectors Service", "version": VERSION}
 
 @app.post("/assignments", response_model=BallCarrierAssignmentInDB, status_code=status.HTTP_201_CREATED,
           summary="Create a new ball carrier assignment",
@@ -61,11 +71,11 @@ async def create_ball_carrier_assignment(assignment: BallCarrierAssignmentCreate
     return BallCarrierAssignmentInDB(**assignment_data)
 
 @app.get("/assignments/current", response_model=List[BallCarrierAssignmentInDB],
-          summary="Get current week's ball carriers",
-          description="Retrieves ball carriers assigned for the current week.")
-async def get_current_ball_carriers():
+          summary="Get current week's ball collectors",
+          description="Retrieves ball collectors assigned for the current week.")
+async def get_current_ball_collectors():
     """
-    Retrieves ball carriers whose assignment date falls within the current week.
+    Retrieves ball collectors whose assignment date falls within the current week.
     """
     today = datetime.date.today()
     # Assuming "current week" means assignments starting from today up to the next 6 days
@@ -79,7 +89,7 @@ async def get_current_ball_carriers():
 @app.get("/assignments/upcoming", response_model=List[BallCarrierAssignmentInDB],
           summary="Get upcoming ball carrier assignments",
           description="Retrieves all ball carrier assignments scheduled for the future.")
-async def get_upcoming_ball_carriers():
+async def get_upcoming_ball_collectors():
     """
     Retrieves all upcoming ball carrier assignments.
     """
@@ -111,24 +121,24 @@ async def delete_ball_carrier_assignment(assignment_id: str):
 
 @app.post("/reminders/send", status_code=status.HTTP_200_OK,
           summary="Send ball carrier reminders",
-          description="Simulates sending reminders to the team about current week's ball carriers. In a real system, this would trigger actual notifications.")
+          description="Simulates sending reminders to the team about current week's ball collectors. In a real system, this would trigger actual notifications.")
 async def send_ball_carrier_reminders():
     """
-    Simulates sending reminders for the current week's ball carriers.
+    Simulates sending reminders for the current week's ball collectors.
     This endpoint would typically be called by a scheduled job (e.g., Google Cloud Scheduler).
     """
-    current_carriers = await get_current_ball_carriers()
-    if not current_carriers:
-        print("No ball carriers assigned for the current week. No reminders sent.")
-        return {"message": "No ball carriers assigned for the current week. No reminders sent."}
+    current_collectors = await get_current_ball_collectors()
+    if not current_collectors:
+        print("No ball collectors assigned for the current week. No reminders sent.")
+        return {"message": "No ball collectors assigned for the current week. No reminders sent."}
 
-    carrier_member_ids = [carrier.member_id for carrier in current_carriers]
+    carrier_member_ids = [carrier.member_id for carrier in current_collectors]
     # In a real application, you would fetch member names from the Team Members Service
     # and then send actual notifications (e.g., email, SMS, push notification)
     # using a service like SendGrid, Twilio, or Google Cloud Pub/Sub with Cloud Functions.
 
     reminder_message = (
-        f"Reminder! This week's ball carriers are: {', '.join(carrier_member_ids)}. "
+        f"Reminder! This week's ball collectors are: {', '.join(carrier_member_ids)}. "
         "Please ensure all responsibilities are met!"
     )
     print(f"Simulating reminder sent: {reminder_message}")

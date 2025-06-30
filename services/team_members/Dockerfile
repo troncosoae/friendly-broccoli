@@ -1,6 +1,9 @@
 # services/team_members_service/Dockerfile
 FROM python:3.9-slim-buster
 
+# This line is crucial for 'curl' to be available for the healthcheck
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY requirements.txt .
