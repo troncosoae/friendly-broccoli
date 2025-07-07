@@ -1,0 +1,74 @@
+# This file defines the Cloud Build steps for both services.
+# The triggers will decide which steps to run based on file changes.
+
+steps:
+# Build and Deploy Service team_members
+- id: 'Build team_members Image'
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/my-services-repo/team-members:$COMMIT_SHA', 'services/team_members']
+  # The 'dir' is implicitly 'services/team_members' because that's the build context given in args
+  # If you wanted to run this from the root and change to 'services/team_members' for context:
+  # dir: 'services/team_members'
+
+- id: 'Push team_members Image'
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/my-services-repo/team-members:$COMMIT_SHA']
+
+- id: 'Deploy team_members Service'
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args:
+  - 'run'
+  - 'deploy'
+  - 'team-members-service' # Cloud Run service name for team_members
+  - '--image'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/my-services-repo/team-members:$COMMIT_SHA'
+  - '--region=us-central1'
+  - '--platform=managed'
+  - '--allow-unauthenticated' # Or configure authentication as needed
+  # *** CHANGE STARTS HERE ***
+  # Reference Secret Manager for MONGO_URI
+  # Format: --update-secrets=ENVIRONMENT_VARIABLE_NAME_IN_SERVICE=SECRET_NAME:SECRET_VERSION
+  # 'latest' is recommended to automatically use the newest secret version
+  - '--update-secrets=MONGO_URI=mongo-uri-secret:latest'
+  # If you had separate username/password:
+  # - '--update-secrets=MONGO_USERNAME=mongo-username-secret:latest'
+  # - '--update-secrets=MONGO_PASSWORD=mongo-password-secret:latest'
+  # *** CHANGE ENDS HERE ***
+
+  # # MongoDB connection environment variable - adjust as needed
+  # - '--set-env-vars=MONGO_URI=mongodb://your-mongodb-host:27017/your-database_name'
+  # # Consider using Secret Manager for sensitive info for production:
+  # # - '--update-secrets=MONGO_PASSWORD=my-mongo-password-secret:latest'
+  # # Add the startup command for Uvicorn if not handled by CMD in Dockerfile or if you want to override
+  # # Note: Dockerfile's CMD is typically sufficient for Cloud Run.
+  # # - '--command=uvicorn'
+  # # - '--args=main:app,--host,0.0.0.0,--port,8080' # Cloud Run uses port 8080 by default
+
+# # Build and Deploy Service Baa
+# # (Assuming 'Baa' is still a separate service in your monorepo, retain its original structure)
+# - id: 'Build Baa Image'
+#   name: 'gcr.io/cloud-builders/docker'
+#   args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/my-services-repo/service-baa:$COMMIT_SHA', './service-baa']
+#   dir: 'service-baa' # Context for Docker build
+
+# - id: 'Push Baa Image'
+#   name: 'gcr.io/cloud-builders/docker'
+#   args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/my-services-repo/service-baa:$COMMIT_SHA']
+
+# - id: 'Deploy Baa Service'
+#   name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+#   entrypoint: gcloud
+#   args:
+#   - 'run'
+#   - 'deploy'
+#   - 'service-baa' # Cloud Run service name for Baa
+#   - '--image'
+#   - 'us-central1-docker.pkg.dev/$PROJECT_ID/my-services-repo/service-baa:$COMMIT_SHA'
+#   - '--region=us-central1'
+#   - '--platform=managed'
+#   - '--allow-unauthenticated' # Or configure authentication as needed
+#   # Add environment variables for MongoDB connection here
+#   - '--set-env-vars=MONGO_URI=mongodb://your-mongodb-host:27017/your-database_name'
+#   # Consider using Secret Manager for sensitive info for production:
+#   # - '--update-secrets=MONGO_PASSWORD=my-mongo-password-secret:latest'

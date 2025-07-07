@@ -1,5 +1,6 @@
 # friendly-broccoli
-Team admin platform. 
+
+Team admin platform.
 
 ## Run locally
 
