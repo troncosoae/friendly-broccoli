@@ -9,7 +9,6 @@ from fastapi import FastAPI, HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr
 
-
 # Load environment variables
 load_dotenv()
 
