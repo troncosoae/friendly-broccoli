@@ -29,3 +29,23 @@ docker compose up --build
     ```bash
     sudo docker run --rm -d --name team_members_api --network app_network -p 8000:80 team_members_service
     ```
+
+## Deploy
+
+### Upload a docker image of a service to gcp
+
+```bash
+gcloud builds submit --tag <artifact_registry_repo_path>/team-members-service
+```
+
+### Run the docker image
+
+```bash
+gcloud run deploy team-members-service \
+  --image <artifact_registry_repo_path>/team-members-service \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --port 80 \
+  --set-env-vars MONGODB_URI=YOUR_MONGODB_URI,DB_NAME=YOUR_DB_NAME
+```
