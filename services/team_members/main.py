@@ -5,7 +5,7 @@ from typing import List, Dict, Optional, Set
 import uuid
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status, Query
+from fastapi import FastAPI, HTTPException, status, Query, APIRouter
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field, BeforeValidator
 from typing_extensions import Annotated
@@ -28,6 +28,8 @@ app = FastAPI(
     title="Team, Team Members, and Coaches Service",
     description="Manages team, team member, and coach information."
 )
+
+v1_router = APIRouter(prefix="/v1", tags=["v1"])
 
 client = AsyncIOMotorClient(MONGODB_URI)
 mg_db = client[DB_NAME]
@@ -249,7 +251,7 @@ async def _validate_coach_exists(coach_id: str):
 
 # --- Team CRUD Operations ---
 
-@app.post("/teams", response_model=TeamInDB, status_code=status.HTTP_201_CREATED,
+@v1_router.post("/teams", response_model=TeamInDB, status_code=status.HTTP_201_CREATED,
           summary="Create a new team",
           description="Adds a new team to the database with a unique ID.")
 async def create_team(team: TeamCreate):
@@ -292,7 +294,7 @@ async def create_team(team: TeamCreate):
     created_team = await teams_collection.find_one({"id": team_id})
     return TeamInDB(**created_team)
 
-@app.get("/teams", response_model=List[TeamInDB],
+@v1_router.get("/teams", response_model=List[TeamInDB],
           summary="Get all teams",
           description="Retrieves a list of all teams.")
 async def get_all_teams():
@@ -305,7 +307,7 @@ async def get_all_teams():
         teams = teams[:100]
     return [TeamInDB(**team) for team in teams]
 
-@app.get("/teams/{team_id}", response_model=TeamInDB,
+@v1_router.get("/teams/{team_id}", response_model=TeamInDB,
           summary="Get a team by ID",
           description="Retrieves a specific team by its unique ID.")
 async def get_team(team_id: str):
@@ -317,7 +319,7 @@ async def get_team(team_id: str):
     team = await _validate_team_exists(team_id)
     return TeamInDB(**team)
 
-@app.put("/teams/{team_id}", response_model=TeamInDB,
+@v1_router.put("/teams/{team_id}", response_model=TeamInDB,
           summary="Update a team",
           description="Updates an existing team's information. Only provided fields will be updated.")
 async def update_team(team_id: str, team_update: TeamUpdate):
@@ -370,7 +372,7 @@ async def update_team(team_id: str, team_update: TeamUpdate):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found after update attempt.")
     return TeamInDB(**updated_team)
 
-@app.delete("/teams/{team_id}", status_code=status.HTTP_204_NO_CONTENT,
+@v1_router.delete("/teams/{team_id}", status_code=status.HTTP_204_NO_CONTENT,
             summary="Delete a team",
             description="Deletes a team from the database by its unique ID. Note: This does NOT automatically delete associated team members or coach roles. If this team was a captain's team, the captain_id in the team will be removed. If members were assigned to this team, they will remain assigned until manually updated.")
 async def delete_team(team_id: str):
@@ -397,7 +399,7 @@ async def delete_team(team_id: str):
 
 # --- Coach CRUD Operations ---
 
-@app.post("/coaches", response_model=CoachInDB, status_code=status.HTTP_201_CREATED,
+@v1_router.post("/coaches", response_model=CoachInDB, status_code=status.HTTP_201_CREATED,
           summary="Create a new coach",
           description="Adds a new coach to the database with a unique ID.")
 async def create_coach(coach: CoachCreate):
@@ -420,7 +422,7 @@ async def create_coach(coach: CoachCreate):
     created_coach = await coaches_collection.find_one({"id": coach_id})
     return CoachInDB(**created_coach)
 
-@app.get("/coaches", response_model=List[CoachInDB],
+@v1_router.get("/coaches", response_model=List[CoachInDB],
           summary="Get all coaches",
           description="Retrieves a list of all coaches.")
 async def get_all_coaches():
@@ -432,7 +434,7 @@ async def get_all_coaches():
         coaches = coaches[:100]
     return [CoachInDB(**coach) for coach in coaches]
 
-@app.get("/coaches/{coach_id}", response_model=CoachInDB,
+@v1_router.get("/coaches/{coach_id}", response_model=CoachInDB,
           summary="Get a coach by ID",
           description="Retrieves a specific coach by their unique ID.")
 async def get_coach(coach_id: str):
@@ -444,7 +446,7 @@ async def get_coach(coach_id: str):
     coach = await _validate_coach_exists(coach_id)
     return CoachInDB(**coach)
 
-@app.put("/coaches/{coach_id}", response_model=CoachInDB,
+@v1_router.put("/coaches/{coach_id}", response_model=CoachInDB,
           summary="Update a coach",
           description="Updates an existing coach's information. Only provided fields will be updated.")
 async def update_coach(coach_id: str, coach_update: CoachUpdate):
@@ -484,7 +486,7 @@ async def update_coach(coach_id: str, coach_update: CoachUpdate):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Coach not found after update attempt.")
     return CoachInDB(**updated_coach)
 
-@app.delete("/coaches/{coach_id}", status_code=status.HTTP_204_NO_CONTENT,
+@v1_router.delete("/coaches/{coach_id}", status_code=status.HTTP_204_NO_CONTENT,
             summary="Delete a coach",
             description="Deletes a coach from the database by their unique ID. Note: This does NOT automatically delete associated team coach roles.")
 async def delete_coach(coach_id: str):
@@ -507,7 +509,7 @@ async def delete_coach(coach_id: str):
 
 # --- Team Coach Role CRUD Operations ---
 
-@app.post("/team-coach-roles", response_model=TeamCoachRoleInDB, status_code=status.HTTP_201_CREATED,
+@v1_router.post("/team-coach-roles", response_model=TeamCoachRoleInDB, status_code=status.HTTP_201_CREATED,
           summary="Assign a coach to a team with a specific role",
           description="Creates a new relationship between a coach and a team, assigning a specific role.")
 async def create_team_coach_role(team_coach_role: TeamCoachRoleCreate):
@@ -541,7 +543,7 @@ async def create_team_coach_role(team_coach_role: TeamCoachRoleCreate):
     created_role = await team_coach_roles_collection.find_one({"id": role_id})
     return TeamCoachRoleInDB(**created_role)
 
-@app.get("/team-coach-roles", response_model=List[TeamCoachRoleInDB],
+@v1_router.get("/team-coach-roles", response_model=List[TeamCoachRoleInDB],
           summary="Get all coach-team role assignments",
           description="Retrieves a list of all coach-team role assignments.")
 async def get_all_team_coach_roles():
@@ -553,7 +555,7 @@ async def get_all_team_coach_roles():
         roles = roles[:100]
     return [TeamCoachRoleInDB(**role) for role in roles]
 
-@app.get("/team-coach-roles/{role_id}", response_model=TeamCoachRoleInDB,
+@v1_router.get("/team-coach-roles/{role_id}", response_model=TeamCoachRoleInDB,
           summary="Get a coach-team role assignment by ID",
           description="Retrieves a specific coach-team role assignment by its unique ID.")
 async def get_team_coach_role(role_id: str):
@@ -567,7 +569,7 @@ async def get_team_coach_role(role_id: str):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Coach-team role assignment not found")
     return TeamCoachRoleInDB(**role)
 
-@app.put("/team-coach-roles/{role_id}", response_model=TeamCoachRoleInDB,
+@v1_router.put("/team-coach-roles/{role_id}", response_model=TeamCoachRoleInDB,
           summary="Update a coach-team role assignment",
           description="Updates an existing coach-team role assignment. Only provided fields will be updated.")
 async def update_team_coach_role(role_id: str, role_update: TeamCoachRoleUpdate):
@@ -597,7 +599,7 @@ async def update_team_coach_role(role_id: str, role_update: TeamCoachRoleUpdate)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Coach-team role assignment not found after update attempt.")
     return TeamCoachRoleInDB(**updated_role)
 
-@app.delete("/team-coach-roles/{role_id}", status_code=status.HTTP_204_NO_CONTENT,
+@v1_router.delete("/team-coach-roles/{role_id}", status_code=status.HTTP_204_NO_CONTENT,
             summary="Delete a coach-team role assignment",
             description="Deletes a coach-team role assignment from the database by its unique ID.")
 async def delete_team_coach_role(role_id: str):
@@ -615,7 +617,7 @@ async def delete_team_coach_role(role_id: str):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Coach-team role assignment not found for deletion.")
     return
 
-@app.get("/teams/{team_id}/coaches", response_model=List[CoachInDB],
+@v1_router.get("/teams/{team_id}/coaches", response_model=List[CoachInDB],
           summary="Get coaches of a specific team",
           description="Retrieves a list of all coaches associated with a specific team ID and their roles within that team.")
 async def get_team_coaches_by_team(team_id: str):
@@ -651,7 +653,7 @@ async def get_team_coaches_by_team(team_id: str):
 
 # --- Team Member CRUD Operations (Modified) ---
 
-@app.post("/members", response_model=TeamMemberInDB, status_code=status.HTTP_201_CREATED,
+@v1_router.post("/members", response_model=TeamMemberInDB, status_code=status.HTTP_201_CREATED,
           summary="Create a new team member",
           description="Adds a new team member to the database with a unique ID, optionally assigning them to teams.")
 async def create_team_member(member: TeamMemberCreate):
@@ -680,7 +682,7 @@ async def create_team_member(member: TeamMemberCreate):
     created_member = await team_members_collection.find_one({"id": member_id})
     return TeamMemberInDB(**created_member)
 
-@app.get("/members", response_model=List[TeamMemberInDB],
+@v1_router.get("/members", response_model=List[TeamMemberInDB],
           summary="Get all team members (optional: filter by team)",
           description="Retrieves a list of all team members, optionally filtered by a single team ID (members belonging to this team).")
 async def get_all_team_members(team_id: Optional[str] = Query(None, description="Optional: Filter members by a single team ID. Returns members who belong to this team.")):
@@ -699,7 +701,7 @@ async def get_all_team_members(team_id: Optional[str] = Query(None, description=
         members = members[:100]  # Limit to 100 members for performance
     return [TeamMemberInDB(**member) for member in members]
 
-@app.get("/teams/{team_id}/members", response_model=List[TeamMemberInDB],
+@v1_router.get("/teams/{team_id}/members", response_model=List[TeamMemberInDB],
           summary="Get members of a specific team",
           description="Retrieves a list of all team members belonging to a specific team ID.")
 async def get_team_members_by_team(team_id: str):
@@ -717,7 +719,7 @@ async def get_team_members_by_team(team_id: str):
     return [TeamMemberInDB(**member) for member in members]
 
 
-@app.get("/members/{member_id}", response_model=TeamMemberInDB,
+@v1_router.get("/members/{member_id}", response_model=TeamMemberInDB,
           summary="Get a team member by ID",
           description="Retrieves a specific team member by their unique ID.")
 async def get_team_member(member_id: str):
@@ -731,7 +733,7 @@ async def get_team_member(member_id: str):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team member not found")
     return TeamMemberInDB(**member)
 
-@app.put("/members/{member_id}", response_model=TeamMemberInDB,
+@v1_router.put("/members/{member_id}", response_model=TeamMemberInDB,
           summary="Update a team member",
           description="Updates an existing team member's information. Only provided fields will be updated.")
 async def update_team_member(member_id: str, member_update: TeamMemberUpdate):
@@ -785,7 +787,7 @@ async def update_team_member(member_id: str, member_update: TeamMemberUpdate):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team member not found after update attempt.")
     return TeamMemberInDB(**updated_member)
 
-@app.delete("/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT,
+@v1_router.delete("/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT,
             summary="Delete a team member",
             description="Deletes a team member from the database by their unique ID. Note: This does NOT automatically update any teams where this member was a captain.")
 async def delete_team_member(member_id: str):
@@ -807,3 +809,5 @@ async def delete_team_member(member_id: str):
     # In a production system, you might want to implement more robust cleanup.
     # For now, if a captain is deleted, the team's captain_id will become a dangling reference.
     return
+
+app.include_router(v1_router)
