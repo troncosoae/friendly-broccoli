@@ -4,6 +4,11 @@ Team admin platform.
 
 ## Run locally
 
+### List of mapped ports used per service
+
+- team_members: 8000
+- ball_collectors: 8001
+
 ### Using Docker Compose
 
 ```bash

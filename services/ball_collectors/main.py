@@ -1,367 +1,314 @@
-# services/ball_collectors/main.py
-
-from datetime import datetime, date, timedelta
-from enum import Enum
+from datetime import datetime
 import os
-from typing import List, Dict
 import uuid
-import asyncio # Import asyncio for running tasks concurrently
+from typing import List, Dict, Optional, Set
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, APIRouter
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, root_validator
-import httpx # Import httpx for making HTTP requests to other services
-import base64 # For base64 encoding the email message
-from email.message import EmailMessage # For constructing the email
+from pydantic import BaseModel, Field, ValidationError
+import httpx # Import httpx for making asynchronous HTTP requests
 
 # Load environment variables
 load_dotenv()
 
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 DB_NAME = os.getenv("DB_NAME", "team_admin")
-COLLECTION = "ball_collectors" # Collection name for ball collector assignments
+TEAM_MEMBERS_SERVICE_URL = os.getenv("TEAM_MEMBERS_SERVICE_URL", "http://team_members_api:80") # URL of your main.py service
 
-# URL for the Team Members Service (as defined in docker-compose.yml)
-# This will be used for inter-service communication
-TEAM_MEMBERS_SERVICE_URL = os.getenv("TEAM_MEMBERS_SERVICE_URL", "http://team_members_api:80")
-
-# Gmail API details (for demonstration purposes)
-# In a real application, you would use proper OAuth 2.0 authentication
-# and securely manage credentials. This 'API_KEY' is a placeholder.
-# You would typically have a Google Cloud Project, enable Gmail API,
-# and configure OAuth 2.0 credentials (e.g., a service account with domain-wide delegation
-# for server-to-server interaction, or a web application flow for user consent).
-GMAIL_API_URL = "https://www.googleapis.com/gmail/v1/users/me/messages/send"
-# The 'from' email address must be an authorized sender for your Gmail API credentials.
-# For simplicity, we'll use a placeholder. In production, this would be tied to your OAuth setup.
-EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "your-email@example.com") 
-# Placeholder for a valid Google access token obtained via OAuth 2.0.
-# THIS TOKEN IS TEMPORARY AND SHOULD NOT BE HARDCODED IN PRODUCTION.
-# It would typically be obtained via a secure OAuth flow and refreshed as needed.
-GOOGLE_ACCESS_TOKEN = os.getenv("GOOGLE_ACCESS_TOKEN", "YOUR_GOOGLE_ACCESS_TOKEN_HERE")
+# Collection names (ensure these match your main.py if you're using shared DB)
+BALL_COLLECTORS_COLLECTION = "ball_collectors"
+# Note: team_members and teams collections are still initialized for direct access
+# in this service for its own operations if needed, but validation now goes via API.
+TEAM_MEMBERS_COLLECTION = "team_members"
+TEAM_COLLECTION = "teams"
 
 
 VERSION = "1.0.0"
 
-# Initialize FastAPI app
+# Initialize FastAPI app for the Ball Collectors Service
 app = FastAPI(
     title="Ball Collectors Service",
-    description="Manages weekly ball carrier assignments and sends reminders."
+    description="Manages ball collection responsibilities for teams and team members."
 )
 
-# Initialize MongoDB client
+v1_router = APIRouter(prefix="/v1", tags=["v1"])
+
+# MongoDB Client Initialization (for ball_collectors collection specifically)
 client = AsyncIOMotorClient(MONGODB_URI)
 mg_db = client[DB_NAME]
-ball_carrier_assignments_collection = mg_db[COLLECTION]
+ball_collectors_collection = mg_db[BALL_COLLECTORS_COLLECTION]
+# Keep these initialized for potential future direct use, but validation now uses API
+team_members_collection = mg_db[TEAM_MEMBERS_COLLECTION]
+teams_collection = mg_db[TEAM_COLLECTION]
 
-# Pydantic models
-class BallCarrierAssignmentBase(BaseModel):
-    member_id: str
-    assignment_date: date = Field(..., description="Date for which the assignment is valid (e.g., start of the week).")
 
-class BallCarrierAssignmentCreate(BallCarrierAssignmentBase):
+# Pydantic models for Ball Collection
+class BallCollectionBase(BaseModel):
+    responsible_id: str = Field(..., description="ID of the team member responsible for ball collection.")
+    team_id: str = Field(..., description="ID of the team this responsibility is attached to.")
+    start_date: datetime = Field(..., description="Start date and time of the responsibility period.")
+    end_date: datetime = Field(..., description="End date and time of the responsibility period.")
+
+class BallCollectionCreate(BallCollectionBase):
     pass
 
-class BallCarrierAssignmentInDB(BallCarrierAssignmentBase):
-    id: str
+class BallCollectionUpdate(BaseModel):
+    responsible_id: Optional[str] = Field(None, description="New ID of the team member responsible for ball collection.")
+    team_id: Optional[str] = Field(None, description="New ID of the team this responsibility is attached to.")
+    start_date: Optional[datetime] = Field(None, description="New start date and time of the responsibility period.")
+    end_date: Optional[datetime] = Field(None, description="New end date and time of the responsibility period.")
 
-    # This validator converts the datetime object (from MongoDB) to a date object for the Pydantic model
-    @root_validator(pre=True)
-    def convert_mongo_datetime_to_date(cls, values):
-        if 'assignment_date' in values and isinstance(values['assignment_date'], datetime):
-            values['assignment_date'] = values['assignment_date'].date()
-        return values
-
-# Helper function to check if a team member exists in the Team Members Service
-async def check_team_member_exists(member_id: str):
-    """
-    Checks if a team member with the given ID exists by querying the Team Members Service.
-    Raises HTTPException if the member does not exist or if the Team Members Service is unreachable.
-    """
-    async with httpx.AsyncClient() as client:
-        try:
-            # Construct the URL to the Team Members Service's member endpoint
-            response = await client.get(f"{TEAM_MEMBERS_SERVICE_URL}/members/{member_id}")
-            response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
-            return response.json() # Return the member data if found
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, # 400 Bad Request for invalid input ID
-                    detail=f"Team member with ID '{member_id}' does not exist in the Team Members Service."
-                )
-            # Re-raise other HTTP errors as internal server error
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error checking Team Members Service: {e.response.text} (Status: {e.response.status_code})"
-            )
-        except httpx.RequestError as e:
-            # Handle network or connection errors
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Could not connect to Team Members Service at {TEAM_MEMBERS_SERVICE_URL}: {e}"
-            )
-
-# New helper function to send email via Gmail API
-async def send_email_via_gmail_api(to_email: str, subject: str, body: str, member_name: str = "Team Member"):
-    """
-    Sends an email using the Gmail API.
-
-    NOTE: This function demonstrates the API call structure.
-    For production, you need to properly handle OAuth 2.0 authentication
-    to get a valid GOOGLE_ACCESS_TOKEN. This token expires and needs to be refreshed.
-    """
-    if not GOOGLE_ACCESS_TOKEN or GOOGLE_ACCESS_TOKEN == "YOUR_GOOGLE_ACCESS_TOKEN_HERE":
-        print("Skipping email send: Google Access Token is not configured.")
-        return {"status": "skipped", "message": "Email sending skipped (no access token)"}
-
-    msg = EmailMessage()
-    msg['To'] = to_email
-    msg['From'] = EMAIL_FROM_ADDRESS
-    msg['Subject'] = subject
-    msg.set_content(body)
-
-    # Encode the email message in base64url format
-    encoded_message = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-
-    headers = {
-        "Authorization": f"Bearer {GOOGLE_ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "raw": encoded_message
-    }
-
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(GMAIL_API_URL, headers=headers, json=payload)
-            response.raise_for_status() # Raise an exception for HTTP errors
-            print(f"Email sent successfully to {to_email} for {member_name}.")
-            return {"status": "success", "message": f"Email sent to {to_email}"}
-        except httpx.HTTPStatusError as e:
-            print(f"Failed to send email to {to_email} for {member_name}: HTTP Error {e.response.status_code} - {e.response.text}")
-            return {"status": "error", "message": f"Failed to send email to {to_email}: {e.response.text}"}
-        except httpx.RequestError as e:
-            print(f"Failed to send email to {to_email} for {member_name}: Request Error - {e}")
-            return {"status": "error", "message": f"Failed to send email to {to_email}: {e}"}
-
+class BallCollectionInDB(BallCollectionBase):
+    id: str = Field(..., description="Unique ID of the ball collection responsibility.")
+    assigned_date: datetime = Field(..., description="Timestamp when the responsibility was assigned.")
+    created_at: datetime = Field(..., description="Timestamp when the responsibility record was created.")
+    updated_at: Optional[datetime] = Field(None, description="Timestamp when the responsibility record was last updated.")
 
 @app.on_event("startup")
 async def startup_event():
-    print(f"Ball Collectors Service started.")
-    print(f"Connecting to database at {MONGODB_URI} with DB name {DB_NAME} and collection {COLLECTION}")
-    # Optional: You might want to check the MongoDB connection here
-    try:
-        await mg_db.command("ping")
-        print("Successfully connected to MongoDB.")
-    except Exception as e:
-        print(f"Failed to connect to MongoDB: {e}")
-        # In a real application, you might want to exit or log a critical error
+    """
+    Prints startup information when the service starts.
+    """
+    print(f"Ball Collectors Service started. Connecting to database at {MONGODB_URI} with DB name {DB_NAME}")
+    print(f"Collections: {BALL_COLLECTORS_COLLECTION}")
+    print(f"Validating against Team Members Service at: {TEAM_MEMBERS_SERVICE_URL}")
 
 
 @app.get("/")
 async def root():
+    """
+    Root endpoint for the service.
+    """
     return {"message": "Ball Collectors Service is running!"}
 
 @app.get("/health", summary="Health Check",
-            description="Checks the health of the Ball Collectors Service.")
+          description="Checks the health of the Ball Collectors Service.")
 async def health_check():
     """
-    Health check endpoint to verify the service is running and connected to MongoDB.
+    Health check endpoint to verify the service is running.
     """
-    try:
-        await mg_db.command("ping") # Check MongoDB connection
-        mongo_status = "ok"
-    except Exception:
-        mongo_status = "error"
-    return {"status": "ok", "service": "Ball Collectors Service", "version": VERSION, "mongodb_status": mongo_status}
+    return {"status": "ok", "service": "Ball Collectors Service", "version": VERSION}
 
-@app.post("/assignments", response_model=BallCarrierAssignmentInDB, status_code=status.HTTP_201_CREATED,
-          summary="Create a new ball carrier assignment",
-          description="Assigns a team member as a ball carrier for a specific date (e.g., start of the week).")
-async def create_ball_carrier_assignment(assignment: BallCarrierAssignmentCreate):
+# --- Validation Helpers (now calling external API) ---
+
+async def _validate_team_exists(team_id: str):
     """
-    Creates a new ball carrier assignment.
-
-    - **member_id**: The ID of the team member assigned. This ID will be verified against the Team Members Service.
-    - **assignment_date**: The date for which the assignment is valid.
+    Helper to validate if a team exists by calling the external Team Members Service API.
     """
-    # Verify if the member_id exists in the Team Members Service
-    await check_team_member_exists(assignment.member_id)
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{TEAM_MEMBERS_SERVICE_URL}/v1/teams/{team_id}")
+            response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+            return response.json() # Return the team data if found
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Team with ID '{team_id}' not found via external service."
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error validating team with ID '{team_id}': {e.response.text}"
+                )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Could not connect to Team Members Service ({TEAM_MEMBERS_SERVICE_URL}) to validate team: {e}"
+            )
 
-    # Convert Pydantic date to datetime at midnight UTC for MongoDB storage
-    assignment_datetime = datetime.combine(assignment.assignment_date, datetime.min.time())
+async def _validate_team_member_exists(member_id: str):
+    """
+    Helper to validate if a team member exists by calling the external Team Members Service API.
+    """
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{TEAM_MEMBERS_SERVICE_URL}/v1/members/{member_id}")
+            response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+            return response.json() # Return the member data if found
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Team member with ID '{member_id}' not found via external service."
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error validating team member with ID '{member_id}': {e.response.text}"
+                )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Could not connect to Team Members Service to validate team member: {e}"
+            )
 
-    assignment_id = str(uuid.uuid4())
-    assignment_data = assignment.model_dump()
-    assignment_data["id"] = assignment_id
-    assignment_data["assignment_date"] = assignment_datetime # Store as datetime
-
-    # Check for existing assignment for the same member on the same date (optional, but good for uniqueness)
-    existing_assignment = await ball_carrier_assignments_collection.find_one({
-        "member_id": assignment_data["member_id"],
-        "assignment_date": assignment_datetime
-    })
-    if existing_assignment:
+async def _validate_member_in_team(member_id: str, team_id: str):
+    """
+    Helper to validate if a team member belongs to a specific team, using data from API.
+    """
+    member_data = await _validate_team_member_exists(member_id) # This already raises HTTPException if member not found
+    
+    # The 'team_ids' field from the external service response should be a list
+    if team_id not in member_data.get("team_ids", []):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An assignment for this member on this date already exists."
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Team member '{member_id}' is not part of team '{team_id}'. Cannot assign responsibility."
         )
 
-    await ball_carrier_assignments_collection.insert_one(assignment_data)
-    # Retrieve the inserted document to ensure it matches the InDB model, including the ID
-    inserted_assignment = await ball_carrier_assignments_collection.find_one({"id": assignment_id})
-    if not inserted_assignment:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve inserted assignment.")
+def _validate_dates(start_date: datetime, end_date: datetime):
+    """Helper to validate that start_date is before end_date."""
+    if start_date >= end_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="End date must be after start date."
+        )
 
-    print(f"Created ball carrier assignment for member {assignment_data['member_id']} on {assignment.assignment_date}")
-    return BallCarrierAssignmentInDB(**inserted_assignment)
+# --- Ball Collection CRUD Operations ---
 
-@app.get("/assignments/current", response_model=List[BallCarrierAssignmentInDB],
-          summary="Get current week's ball collectors",
-          description="Retrieves ball collectors assigned for the current week.")
-async def get_current_ball_collectors():
+@v1_router.post("/ball-collections", response_model=BallCollectionInDB, status_code=status.HTTP_201_CREATED,
+          summary="Create a new ball collection assignment",
+          description="Assigns a team member to ball collection duties for a specific team and period.")
+async def create_ball_collection(ball_collection: BallCollectionCreate):
     """
-    Retrieves ball collectors whose assignment date falls within the current week.
-    The current week is defined as starting from today.
+    Creates a new ball collection assignment.
+
+    - **responsible_id**: The ID of the team member responsible.
+    - **team_id**: The ID of the team this responsibility is for.
+    - **start_date**: The start date and time of the responsibility.
+    - **end_date**: The end date and time of the responsibility.
     """
-    today = date.today()
-    # Define the start of the current week (e.g., Monday of the current week)
-    # For simplicity here, we'll consider "current week" as assignments from today up to the next 7 days
-    start_of_period = datetime.combine(today, datetime.min.time())
-    end_of_period = datetime.combine(today + timedelta(days=7), datetime.min.time())
+    # Validate existence of team and team member via API calls
+    await _validate_team_exists(ball_collection.team_id)
+    await _validate_team_member_exists(ball_collection.responsible_id)
 
-    # Query MongoDB for assignments within the current week
-    assignments = await ball_carrier_assignments_collection.find({
-        "assignment_date": {
-            "$gte": start_of_period,
-            "$lt": end_of_period
-        }
-    }).to_list(length=None)
+    # Validate that the team member is part of the specified team via API data
+    await _validate_member_in_team(ball_collection.responsible_id, ball_collection.team_id)
 
-    # Verify existence of each member_id for the fetched assignments
-    # In a real scenario, you might do this only when displaying, or cache results
-    verified_assignments = []
-    for assignment_doc in assignments:
-        try:
-            # We don't need the full response, just to check existence
-            await check_team_member_exists(assignment_doc["member_id"])
-            verified_assignments.append(BallCarrierAssignmentInDB(**assignment_doc))
-        except HTTPException as e:
-            print(f"Warning: Assignment {assignment_doc.get('id')} has an invalid member_id {assignment_doc['member_id']}: {e.detail}")
-            # Optionally, you might log this or skip this assignment
+    # Validate date consistency
+    _validate_dates(ball_collection.start_date, ball_collection.end_date)
 
-    return verified_assignments
+    assignment_id = str(uuid.uuid4())
+    assignment_data = ball_collection.model_dump()
+    assignment_data["id"] = assignment_id
+    assignment_data["assigned_date"] = datetime.utcnow()
+    assignment_data["created_at"] = datetime.utcnow()
+    assignment_data["updated_at"] = None
 
-@app.get("/assignments/upcoming", response_model=List[BallCarrierAssignmentInDB],
-          summary="Get upcoming ball carrier assignments",
-          description="Retrieves all ball carrier assignments scheduled for the future.")
-async def get_upcoming_ball_collectors():
+    await ball_collectors_collection.insert_one(assignment_data)
+    created_assignment = await ball_collectors_collection.find_one({"id": assignment_id})
+    return BallCollectionInDB(**created_assignment)
+
+@v1_router.get("/ball-collections", response_model=List[BallCollectionInDB],
+          summary="Get all ball collection assignments",
+          description="Retrieves a list of all ball collection assignments, optionally filtered by team or responsible member.")
+async def get_all_ball_collections(
+    team_id: Optional[str] = None,
+    responsible_id: Optional[str] = None
+):
     """
-    Retrieves all upcoming ball carrier assignments.
+    Retrieves all ball collection assignments, with optional filters.
+
+    - **team_id**: Optional filter by team ID.
+    - **responsible_id**: Optional filter by responsible team member ID.
     """
-    today_datetime = datetime.combine(date.today(), datetime.min.time())
+    query_filter = {}
+    if team_id:
+        # Validate team_id via API if provided as a filter
+        await _validate_team_exists(team_id)
+        query_filter["team_id"] = team_id
+    if responsible_id:
+        # Validate responsible_id via API if provided as a filter
+        await _validate_team_member_exists(responsible_id)
+        query_filter["responsible_id"] = responsible_id
 
-    # Query MongoDB for assignments with an assignment_date greater than today
-    assignments = await ball_carrier_assignments_collection.find({
-        "assignment_date": {"$gt": today_datetime}
-    }).to_list(length=None)
+    assignments = await ball_collectors_collection.find(query_filter).to_list(length=None)
+    # Limit to 100 assignments for performance, can be paginated in a real app
+    if len(assignments) > 100:
+        assignments = assignments[:100]
+    return [BallCollectionInDB(**assignment) for assignment in assignments]
 
-    upcoming_assignments = [BallCarrierAssignmentInDB(**assign) for assign in assignments]
-    # Sort by assignment date (Pydantic models will have 'date' objects, which are comparable)
-    upcoming_assignments.sort(key=lambda x: x.assignment_date)
-
-    # Optional: Verify existence of each member_id for the fetched assignments
-    verified_upcoming_assignments = []
-    for assignment_item in upcoming_assignments:
-        try:
-            await check_team_member_exists(assignment_item.member_id)
-            verified_upcoming_assignments.append(assignment_item)
-        except HTTPException as e:
-            print(f"Warning: Upcoming assignment {assignment_item.id} has an invalid member_id {assignment_item.member_id}: {e.detail}")
-
-    return verified_upcoming_assignments
-
-
-@app.delete("/assignments/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT,
-            summary="Delete a ball carrier assignment",
-            description="Deletes a ball carrier assignment by its unique ID.")
-async def delete_ball_carrier_assignment(assignment_id: str):
+@v1_router.get("/ball-collections/{assignment_id}", response_model=BallCollectionInDB,
+          summary="Get a ball collection assignment by ID",
+          description="Retrieves a specific ball collection assignment by its unique ID.")
+async def get_ball_collection(assignment_id: str):
     """
-    Deletes a ball carrier assignment.
+    Retrieves a single ball collection assignment by its ID.
+
+    - **assignment_id**: The unique ID of the assignment.
+    """
+    assignment = await ball_collectors_collection.find_one({"id": assignment_id})
+    if not assignment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ball collection assignment not found")
+    return BallCollectionInDB(**assignment)
+
+@v1_router.put("/ball-collections/{assignment_id}", response_model=BallCollectionInDB,
+          summary="Update a ball collection assignment",
+          description="Updates an existing ball collection assignment. Only provided fields will be updated.")
+async def update_ball_collection(assignment_id: str, assignment_update: BallCollectionUpdate):
+    """
+    Updates an existing ball collection assignment.
+
+    - **assignment_id**: The unique ID of the assignment to update.
+    - **responsible_id**: New responsible team member ID (optional).
+    - **team_id**: New team ID (optional).
+    - **start_date**: New start date (optional).
+    - **end_date**: New end date (optional).
+    """
+    existing_assignment = await ball_collectors_collection.find_one({"id": assignment_id})
+    if not existing_assignment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ball collection assignment not found")
+
+    update_data = assignment_update.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields provided for update.")
+
+    # Determine current values for validation, prioritizing update_data if present
+    current_responsible_id = update_data.get("responsible_id", existing_assignment["responsible_id"])
+    current_team_id = update_data.get("team_id", existing_assignment["team_id"])
+    current_start_date = update_data.get("start_date", existing_assignment["start_date"])
+    current_end_date = update_data.get("end_date", existing_assignment["end_date"])
+
+    # Validate responsible_id and team_id if they are being updated or if they are required for cross-validation
+    if "responsible_id" in update_data or "team_id" in update_data:
+        await _validate_team_member_exists(current_responsible_id)
+        await _validate_team_exists(current_team_id)
+        # Re-validate member in team if either responsible_id or team_id changed
+        await _validate_member_in_team(current_responsible_id, current_team_id)
+
+    # Validate dates if they are being updated or if cross-validation requires it
+    if "start_date" in update_data or "end_date" in update_data:
+        _validate_dates(current_start_date, current_end_date)
+
+    update_data["updated_at"] = datetime.utcnow()
+
+    updated_assignment = await ball_collectors_collection.find_one_and_update(
+        {"id": assignment_id},
+        {"$set": update_data},
+        return_document=True
+    )
+
+    if not updated_assignment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ball collection assignment not found after update attempt.")
+    return BallCollectionInDB(**updated_assignment)
+
+@v1_router.delete("/ball-collections/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT,
+            summary="Delete a ball collection assignment",
+            description="Deletes a ball collection assignment from the database by its unique ID.")
+async def delete_ball_collection(assignment_id: str):
+    """
+    Deletes a ball collection assignment.
 
     - **assignment_id**: The unique ID of the assignment to delete.
     """
-    # Find the assignment first to ensure it exists before attempting to delete
-    existing_assignment = await ball_carrier_assignments_collection.find_one({"id": assignment_id})
-    if not existing_assignment:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found")
+    assignment = await ball_collectors_collection.find_one({"id": assignment_id})
+    if not assignment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ball collection assignment not found")
 
-    result = await ball_carrier_assignments_collection.delete_one({"id": assignment_id})
+    result = await ball_collectors_collection.delete_one({"id": assignment_id})
     if result.deleted_count == 0:
-        # This case should ideally not be reached if existing_assignment was found
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found after check.")
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ball collection assignment not found for deletion.")
     return
 
-@app.post("/reminders/send", status_code=status.HTTP_200_OK,
-          summary="Send ball carrier reminders",
-          description="Simulates sending reminders to the team about current week's ball collectors. In a real system, this would trigger actual notifications.")
-async def send_ball_carrier_reminders():
-    """
-    Simulates sending reminders for the current week's ball collectors.
-    This endpoint would typically be called by a scheduled job (e.g., Google Cloud Scheduler).
-    It now fetches assignments from MongoDB and attempts to verify member IDs, and send emails.
-    """
-    current_collectors = await get_current_ball_collectors() # This now fetches from MongoDB and verifies members
-
-    if not current_collectors:
-        print("No ball collectors assigned for the current week. No reminders sent.")
-        return {"message": "No ball collectors assigned for the current week. No reminders sent."}
-
-    # Prepare reminder messages and gather email sending tasks
-    email_tasks = []
-    reminder_details = []
-
-    for assignment in current_collectors:
-        try:
-            member_info = await check_team_member_exists(assignment.member_id)
-            member_name = member_info.get('name', 'Unknown Member')
-            member_email = member_info.get('email') # Assuming your TeamMemberInDB model has 'email'
-            
-            if member_email:
-                subject = "Ball Collector Reminder: This Week's Assignment!"
-                body = (
-                    f"Hi {member_name},\n\n"
-                    f"This is a reminder that you are assigned as a ball collector for the week starting {assignment.assignment_date.strftime('%Y-%m-%d')}. "
-                    "Please ensure all responsibilities are met.\n\n"
-                    "Thank you,\n"
-                    "Your Team"
-                )
-                # Add email sending task to the list
-                email_tasks.append(send_email_via_gmail_api(member_email, subject, body, member_name))
-                reminder_details.append(f"{member_name} (ID: {assignment.member_id}, Email: {member_email})")
-            else:
-                print(f"Warning: Member {member_name} (ID: {assignment.member_id}) does not have an email address for reminders.")
-                reminder_details.append(f"{member_name} (ID: {assignment.member_id}, No Email)")
-
-        except HTTPException as e:
-            print(f"Could not retrieve info for member ID {assignment.member_id} for reminder: {e.detail}")
-            reminder_details.append(f"Invalid Member (ID: {assignment.member_id})")
-    
-    # Run all email sending tasks concurrently
-    email_results = await asyncio.gather(*email_tasks, return_exceptions=True)
-
-    successful_emails = [res for res in email_results if isinstance(res, dict) and res.get("status") == "success"]
-    failed_emails = [res for res in email_results if not isinstance(res, dict) or res.get("status") != "success"]
-
-    message = (
-        f"Reminder simulation successful. {len(successful_emails)} emails attempted and {len(failed_emails)} failed. "
-        f"Details for current week's ball collectors: {', '.join(reminder_details)}."
-    )
-    if failed_emails:
-        message += f"\nFailed email details: {failed_emails}"
-
-    print(f"Simulating reminder sent: {message}")
-    return {"message": message}
+app.include_router(v1_router)
