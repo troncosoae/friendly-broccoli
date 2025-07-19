@@ -2,6 +2,9 @@ from datetime import datetime, timedelta
 import os
 import uuid
 from typing import List, Dict, Optional, Set
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, APIRouter
@@ -21,12 +24,22 @@ DB_NAME = os.getenv("DB_NAME", DEFAULT_DB_NAME)
 TEAM_MEMBERS_SERVICE_URL = os.getenv(
     "TEAM_MEMBERS_SERVICE_URL", DEFAULT_TEAM_MEMBERS_SERVICE_URL) # URL of your main.py service
 
+# Email configuration
+SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+SENDER_EMAIL_PASSWORD = os.getenv("SENDER_EMAIL_PASSWORD") # This should be an App Password for Gmail
+print(f"Sender email: {SENDER_EMAIL}")
+print(f"Sender email password: {SENDER_EMAIL_PASSWORD}")
+
 if (MONGODB_URI == DEFAULT_MONGODB_URI):
-    print(f"Warning: Using default MongoDB URI 'MONGODB_URI' Ensure this is correct for your environment.")
+    print(f"Warning: Using default MongoDB URI 'MONGODB_URI'. Ensure this is correct for your environment.")
 if (DB_NAME == DEFAULT_DB_NAME):
     print(f"Warning: Using default DB name '{DB_NAME}'. Ensure this is correct for your environment.")
 if (TEAM_MEMBERS_SERVICE_URL == DEFAULT_TEAM_MEMBERS_SERVICE_URL):
     print(f"Warning: Using default Team Members Service URL '{TEAM_MEMBERS_SERVICE_URL}'. Ensure this is correct for your environment.")
+if not SENDER_EMAIL:
+    print("Warning: SENDER_EMAIL environment variable is not set. Email sending will not work.")
+if not SENDER_EMAIL_PASSWORD:
+    print("Warning: SENDER_EMAIL_PASSWORD environment variable is not set. Email sending will not work.")
 
 
 # Collection names (ensure these match your main.py if you're using shared DB)
@@ -176,16 +189,16 @@ async def _validate_member_in_team(member_id: str, team_id: str):
             detail=f"Team member '{member_id}' is not part of team '{team_id}'. Cannot assign responsibility."
         )
 
-async def _get_team_members(team_id: str) -> Set[str]:
+async def _get_team_members(team_id: str) -> List[Dict]:
     """
     Helper to get all team members for a given team ID.
-    This is a local function that can be used if needed, but validation now uses API.
+    This function now calls the external Team Members Service API.
     """
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(f"{TEAM_MEMBERS_SERVICE_URL}/v1/teams/{team_id}/members")
             response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
-            return response.json() # Return the member data if found
+            return response.json() # Return the list of member data if found
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 raise HTTPException(
@@ -195,12 +208,12 @@ async def _get_team_members(team_id: str) -> Set[str]:
             else:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Error getting team members with team with ID '{team_id}': {e.response.text}"
+                    detail=f"Error getting team members for team with ID '{team_id}': {e.response.text}"
                 )
         except httpx.RequestError as e:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Could not connect to Team Members Service to validate team member: {e}"
+                detail=f"Could not connect to Team Members Service to get team members: {e}"
             )
 
 def _validate_dates(start_date: datetime, end_date: datetime):
@@ -210,6 +223,45 @@ def _validate_dates(start_date: datetime, end_date: datetime):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="End date must be after start date."
         )
+
+# --- Email Sending Helper ---
+async def _send_email(to_addrs: List[str], cc_addrs: List[str], subject: str, body: str):
+    """
+    Sends an email using SMTP.
+    Requires SENDER_EMAIL and SENDER_EMAIL_PASSWORD environment variables to be set.
+    For Gmail, SENDER_EMAIL_PASSWORD should be an App Password.
+    """
+    if not SENDER_EMAIL or not SENDER_EMAIL_PASSWORD:
+        print("Email sending skipped: SENDER_EMAIL or SENDER_EMAIL_PASSWORD not configured.")
+        return False
+
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg['Cc'] = ", ".join(cc_addrs)
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+
+    try:
+        # For Gmail, use 'smtp.gmail.com' and port 587 with TLS
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server: # Using 465 for SSL directly
+            # server.starttls() # Not needed for SMTP_SSL
+            server.login(SENDER_EMAIL, SENDER_EMAIL_PASSWORD)
+            recipients = to_addrs + cc_addrs
+            server.sendmail(SENDER_EMAIL, recipients, msg.as_string())
+        print(f"Email successfully sent to {to_addrs} (CC: {cc_addrs})")
+        return True
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"SMTP Authentication Error: {e}. Check SENDER_EMAIL and SENDER_EMAIL_PASSWORD (App Password).")
+        return False
+    except smtplib.SMTPConnectError as e:
+        print(f"SMTP Connection Error: {e}. Could not connect to the SMTP server.")
+        return False
+    except Exception as e:
+        print(f"An unexpected error occurred while sending email: {e}")
+        return False
+
 # --- Ball Collection CRUD Operations ---
 
 @v1_router.post("/ball-collections", response_model=BallCollectionInDB, status_code=status.HTTP_201_CREATED,
@@ -408,22 +460,20 @@ async def send_upcoming_ball_collection_emails(
             try:
                 # 1. Fetch team details to get team name and all member IDs
                 team_data = await _validate_team_exists(current_team_id) # This helper now returns team data
-                print(f"team_data: {team_data}") # Debugging line to see fetched team data
-
+                
                 if not team_data:
                     failed_emails.append({"team_id": current_team_id, "reason": "Team data not found."})
                     continue
-                team_id = team_data.get("id", current_team_id)
-                # get the team members from the team data
-                team_members = await _get_team_members(team_id) # This is a local function that can be used if needed, but validation now uses API
-                if not team_members:
+                
+                team_name = team_data.get("name", f"Team {current_team_id}")
+                
+                # Fetch all members of the team using the new _get_team_members helper
+                team_members_list = await _get_team_members(current_team_id)
+                if not team_members_list:
                     failed_emails.append({"team_id": current_team_id, "reason": "No team members found for this team."})
                     continue
-                print(f"team_members: {team_members}") # Debugging line to see fetched team members
-
-                team_name = team_data.get("name", f"Team {current_team_id}")
-                all_team_member_ids = set(member["id"] for member in team_members) # Assuming team_members is a list of dicts with 'id' keys
-                print(f"all_team_member_ids: {all_team_member_ids}") # Debugging line to see all team member IDs
+                
+                all_team_member_ids = {member["id"] for member in team_members_list}
 
                 # 2. Fetch details for all relevant members (responsible and all team members)
                 all_relevant_member_ids = responsible_member_ids.union(all_team_member_ids)
@@ -433,7 +483,6 @@ async def send_upcoming_ball_collection_emails(
                         member_data = await _validate_team_member_exists(member_id) # This helper now returns member data
                         member_details[member_id] = member_data
                     except HTTPException as e:
-                        # Log or handle members that couldn't be fetched, but don't stop the whole process
                         print(f"Warning: Could not fetch details for member {member_id}: {e.detail}")
                         failed_emails.append({"team_id": current_team_id, "member_id": member_id, "reason": f"Could not fetch member details: {e.detail}"})
                     except Exception as e:
@@ -475,16 +524,13 @@ async def send_upcoming_ball_collection_emails(
                     f"Please support them as needed!"
                 )
 
-                # 5. Simulate sending email
+                # 5. Send email
                 if to_emails: # Only attempt to send if there are 'To' recipients
-                    print(f"--- SIMULATING EMAIL SEND FOR TEAM: {team_name} ({current_team_id}) ---")
-                    print(f"To: {', '.join(to_emails)}")
-                    if cc_emails:
-                        print(f"CC: {', '.join(cc_emails)}")
-                    print(f"Subject: {email_request.subject}")
-                    print(f"Body:\n{email_body}\n")
-                    print(f"--- END SIMULATION ---")
-                    sent_emails_count += 1
+                    email_sent = await _send_email(to_emails, cc_emails, email_request.subject, email_body)
+                    if email_sent:
+                        sent_emails_count += 1
+                    else:
+                        failed_emails.append({"team_id": current_team_id, "reason": "Failed to send email via SMTP."})
                 else:
                     failed_emails.append({"team_id": current_team_id, "reason": "No valid 'To' recipients for this team's email."})
 
@@ -504,7 +550,7 @@ async def send_upcoming_ball_collection_emails(
                     "reason": f"An unexpected error occurred for team {current_team_id}: {e}"
                 })
 
-    response_message = f"Successfully simulated sending emails for {sent_emails_count} teams."
+    response_message = f"Successfully sent emails for {sent_emails_count} teams."
     if failed_emails:
         response_message += f" Failed to process or send emails for some members/teams."
         return {
