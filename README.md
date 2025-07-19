@@ -52,5 +52,5 @@ gcloud run deploy team-members-service \
   --region us-central1 \
   --allow-unauthenticated \
   --port 80 \
-  --set-env-vars MONGODB_URI=YOUR_MONGODB_URI,DB_NAME=YOUR_DB_NAME
+  --set-env-vars MONGODB_URI=<YOUR_MONGODB_URI>,DB_NAME=<YOUR_DB_NAME>
 ```

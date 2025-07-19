@@ -14,8 +14,17 @@ from typing_extensions import Annotated
 # Load environment variables
 load_dotenv()
 
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("DB_NAME", "team_admin")
+DEFAULT_MONGODB_URI = "mongodb://localhost:27017"
+DEFAULT_DB_NAME = "team_admin"
+
+MONGODB_URI = os.getenv("MONGODB_URI", DEFAULT_MONGODB_URI)
+DB_NAME = os.getenv("DB_NAME", DEFAULT_DB_NAME)
+
+if (MONGODB_URI == DEFAULT_MONGODB_URI):
+    print(f"Warning: Using default MongoDB URI 'MONGODB_URI'. Ensure this is correct for your environment.")
+if (DB_NAME == DEFAULT_DB_NAME):
+    print(f"Warning: Using default DB name '{DB_NAME}'. Ensure this is correct for your environment.")
+
 TEAM_COLLECTION = "teams"
 TEAM_MEMBERS_COLLECTION = "team_members"
 COACH_COLLECTION = "coaches"

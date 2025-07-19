@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import uuid
 from typing import List, Dict, Optional, Set
@@ -12,9 +12,22 @@ import httpx # Import httpx for making asynchronous HTTP requests
 # Load environment variables
 load_dotenv()
 
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("DB_NAME", "team_admin")
-TEAM_MEMBERS_SERVICE_URL = os.getenv("TEAM_MEMBERS_SERVICE_URL", "http://team_members_api:80") # URL of your main.py service
+DEFAULT_MONGODB_URI = "mongodb://localhost:27017"
+DEFAULT_DB_NAME = "team_admin"
+DEFAULT_TEAM_MEMBERS_SERVICE_URL = "http://team_members_api:80"
+
+MONGODB_URI = os.getenv("MONGODB_URI", DEFAULT_MONGODB_URI)
+DB_NAME = os.getenv("DB_NAME", DEFAULT_DB_NAME)
+TEAM_MEMBERS_SERVICE_URL = os.getenv(
+    "TEAM_MEMBERS_SERVICE_URL", DEFAULT_TEAM_MEMBERS_SERVICE_URL) # URL of your main.py service
+
+if (MONGODB_URI == DEFAULT_MONGODB_URI):
+    print(f"Warning: Using default MongoDB URI 'MONGODB_URI' Ensure this is correct for your environment.")
+if (DB_NAME == DEFAULT_DB_NAME):
+    print(f"Warning: Using default DB name '{DB_NAME}'. Ensure this is correct for your environment.")
+if (TEAM_MEMBERS_SERVICE_URL == DEFAULT_TEAM_MEMBERS_SERVICE_URL):
+    print(f"Warning: Using default Team Members Service URL '{TEAM_MEMBERS_SERVICE_URL}'. Ensure this is correct for your environment.")
+
 
 # Collection names (ensure these match your main.py if you're using shared DB)
 BALL_COLLECTORS_COLLECTION = "ball_collectors"
@@ -65,6 +78,10 @@ class BallCollectionInDB(BallCollectionBase):
     created_at: datetime = Field(..., description="Timestamp when the responsibility record was created.")
     updated_at: Optional[datetime] = Field(None, description="Timestamp when the responsibility record was last updated.")
 
+# New Pydantic model for email request (body is now dynamically generated)
+class UpcomingBallCollectionEmailRequest(BaseModel):
+    subject: str = Field(..., description="Subject of the email.")
+
 @app.on_event("startup")
 async def startup_event():
     """
@@ -83,7 +100,7 @@ async def root():
     return {"message": "Ball Collectors Service is running!"}
 
 @app.get("/health", summary="Health Check",
-          description="Checks the health of the Ball Collectors Service.")
+             description="Checks the health of the Ball Collectors Service.")
 async def health_check():
     """
     Health check endpoint to verify the service is running.
@@ -95,6 +112,7 @@ async def health_check():
 async def _validate_team_exists(team_id: str):
     """
     Helper to validate if a team exists by calling the external Team Members Service API.
+    Returns the team data if found.
     """
     async with httpx.AsyncClient() as client:
         try:
@@ -121,6 +139,7 @@ async def _validate_team_exists(team_id: str):
 async def _validate_team_member_exists(member_id: str):
     """
     Helper to validate if a team member exists by calling the external Team Members Service API.
+    Returns the member data if found.
     """
     async with httpx.AsyncClient() as client:
         try:
@@ -157,6 +176,33 @@ async def _validate_member_in_team(member_id: str, team_id: str):
             detail=f"Team member '{member_id}' is not part of team '{team_id}'. Cannot assign responsibility."
         )
 
+async def _get_team_members(team_id: str) -> Set[str]:
+    """
+    Helper to get all team members for a given team ID.
+    This is a local function that can be used if needed, but validation now uses API.
+    """
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{TEAM_MEMBERS_SERVICE_URL}/v1/teams/{team_id}/members")
+            response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+            return response.json() # Return the member data if found
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Team with ID '{team_id}' not found via external service."
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error getting team members with team with ID '{team_id}': {e.response.text}"
+                )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Could not connect to Team Members Service to validate team member: {e}"
+            )
+
 def _validate_dates(start_date: datetime, end_date: datetime):
     """Helper to validate that start_date is before end_date."""
     if start_date >= end_date:
@@ -164,12 +210,11 @@ def _validate_dates(start_date: datetime, end_date: datetime):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="End date must be after start date."
         )
-
 # --- Ball Collection CRUD Operations ---
 
 @v1_router.post("/ball-collections", response_model=BallCollectionInDB, status_code=status.HTTP_201_CREATED,
-          summary="Create a new ball collection assignment",
-          description="Assigns a team member to ball collection duties for a specific team and period.")
+            summary="Create a new ball collection assignment",
+            description="Assigns a team member to ball collection duties for a specific team and period.")
 async def create_ball_collection(ball_collection: BallCollectionCreate):
     """
     Creates a new ball collection assignment.
@@ -201,8 +246,8 @@ async def create_ball_collection(ball_collection: BallCollectionCreate):
     return BallCollectionInDB(**created_assignment)
 
 @v1_router.get("/ball-collections", response_model=List[BallCollectionInDB],
-          summary="Get all ball collection assignments",
-          description="Retrieves a list of all ball collection assignments, optionally filtered by team or responsible member.")
+            summary="Get all ball collection assignments",
+            description="Retrieves a list of all ball collection assignments, optionally filtered by team or responsible member.")
 async def get_all_ball_collections(
     team_id: Optional[str] = None,
     responsible_id: Optional[str] = None
@@ -230,8 +275,8 @@ async def get_all_ball_collections(
     return [BallCollectionInDB(**assignment) for assignment in assignments]
 
 @v1_router.get("/ball-collections/{assignment_id}", response_model=BallCollectionInDB,
-          summary="Get a ball collection assignment by ID",
-          description="Retrieves a specific ball collection assignment by its unique ID.")
+            summary="Get a ball collection assignment by ID",
+            description="Retrieves a specific ball collection assignment by its unique ID.")
 async def get_ball_collection(assignment_id: str):
     """
     Retrieves a single ball collection assignment by its ID.
@@ -244,8 +289,8 @@ async def get_ball_collection(assignment_id: str):
     return BallCollectionInDB(**assignment)
 
 @v1_router.put("/ball-collections/{assignment_id}", response_model=BallCollectionInDB,
-          summary="Update a ball collection assignment",
-          description="Updates an existing ball collection assignment. Only provided fields will be updated.")
+            summary="Update a ball collection assignment",
+            description="Updates an existing ball collection assignment. Only provided fields will be updated.")
 async def update_ball_collection(assignment_id: str, assignment_update: BallCollectionUpdate):
     """
     Updates an existing ball collection assignment.
@@ -310,5 +355,169 @@ async def delete_ball_collection(assignment_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ball collection assignment not found for deletion.")
     return
+
+@v1_router.post("/ball-collections/send-upcoming-emails", status_code=status.HTTP_200_OK,
+            summary="Send emails to teams with upcoming ball collection duties",
+            description="Identifies teams with members responsible for ball collection within the next 7 days and sends a single email per team.")
+async def send_upcoming_ball_collection_emails(
+    email_request: UpcomingBallCollectionEmailRequest,
+    team_id: Optional[str] = None # Added team_id as an optional query parameter
+):
+    """
+    Sends a single email per team to all team members who have ball collection responsibilities
+    starting within the next 7 days. The email lists the responsible members for that team,
+    with other team members CC'd.
+
+    - **subject**: The subject line of the email.
+    - **team_id**: Optional. If provided, emails will only be sent for this specific team.
+    """
+    now = datetime.utcnow()
+    seven_days_from_now = now + timedelta(days=7)
+
+    # Find assignments where the start_date is within the next 7 days
+    # and the end_date has not passed yet.
+    query_filter = {
+        "start_date": {"$lte": seven_days_from_now},
+        "end_date": {"$gte": now}
+    }
+
+    if team_id:
+        # If a specific team_id is provided, validate it and add to the filter
+        await _validate_team_exists(team_id)
+        query_filter["team_id"] = team_id
+
+    upcoming_assignments = await ball_collectors_collection.find(query_filter).to_list(length=None)
+
+    if not upcoming_assignments:
+        return {"message": "No upcoming ball collection assignments found in the next 7 days. No emails sent."}
+
+    # Group responsible members by team
+    team_responsible_members: Dict[str, Set[str]] = {}
+    for assignment in upcoming_assignments:
+        current_team_id = assignment["team_id"]
+        responsible_id = assignment["responsible_id"]
+        if current_team_id not in team_responsible_members:
+            team_responsible_members[current_team_id] = set()
+        team_responsible_members[current_team_id].add(responsible_id)
+
+    sent_emails_count = 0
+    failed_emails: List[Dict] = []
+    
+    async with httpx.AsyncClient() as client:
+        for current_team_id, responsible_member_ids in team_responsible_members.items():
+            try:
+                # 1. Fetch team details to get team name and all member IDs
+                team_data = await _validate_team_exists(current_team_id) # This helper now returns team data
+                print(f"team_data: {team_data}") # Debugging line to see fetched team data
+
+                if not team_data:
+                    failed_emails.append({"team_id": current_team_id, "reason": "Team data not found."})
+                    continue
+                team_id = team_data.get("id", current_team_id)
+                # get the team members from the team data
+                team_members = await _get_team_members(team_id) # This is a local function that can be used if needed, but validation now uses API
+                if not team_members:
+                    failed_emails.append({"team_id": current_team_id, "reason": "No team members found for this team."})
+                    continue
+                print(f"team_members: {team_members}") # Debugging line to see fetched team members
+
+                team_name = team_data.get("name", f"Team {current_team_id}")
+                all_team_member_ids = set(member["id"] for member in team_members) # Assuming team_members is a list of dicts with 'id' keys
+                print(f"all_team_member_ids: {all_team_member_ids}") # Debugging line to see all team member IDs
+
+                # 2. Fetch details for all relevant members (responsible and all team members)
+                all_relevant_member_ids = responsible_member_ids.union(all_team_member_ids)
+                member_details: Dict[str, Dict] = {}
+                for member_id in all_relevant_member_ids:
+                    try:
+                        member_data = await _validate_team_member_exists(member_id) # This helper now returns member data
+                        member_details[member_id] = member_data
+                    except HTTPException as e:
+                        # Log or handle members that couldn't be fetched, but don't stop the whole process
+                        print(f"Warning: Could not fetch details for member {member_id}: {e.detail}")
+                        failed_emails.append({"team_id": current_team_id, "member_id": member_id, "reason": f"Could not fetch member details: {e.detail}"})
+                    except Exception as e:
+                        print(f"Warning: Unexpected error fetching details for member {member_id}: {e}")
+                        failed_emails.append({"team_id": current_team_id, "member_id": member_id, "reason": f"Unexpected error fetching member details: {e}"})
+
+
+                # 3. Determine 'To' and 'CC' recipients
+                to_emails: List[str] = []
+                cc_emails: List[str] = []
+                responsible_names: List[str] = []
+
+                for member_id in responsible_member_ids:
+                    member_info = member_details.get(member_id)
+                    if member_info and member_info.get("email"):
+                        to_emails.append(member_info["email"])
+                        responsible_names.append(member_info.get("name", member_id))
+                    else:
+                        failed_emails.append({"team_id": current_team_id, "member_id": member_id, "reason": "Responsible member email not found."})
+
+                for member_id in all_team_member_ids:
+                    if member_id not in responsible_member_ids: # Only CC members who are not responsible
+                        member_info = member_details.get(member_id)
+                        if member_info and member_info.get("email"):
+                            cc_emails.append(member_info["email"])
+                        else:
+                            failed_emails.append({"team_id": current_team_id, "member_id": member_id, "reason": "CC member email not found."})
+
+                # 4. Construct email body
+                if not responsible_names:
+                    # If no responsible members could be found with emails, skip sending for this team
+                    failed_emails.append({"team_id": current_team_id, "reason": "No responsible members with valid emails found for this team."})
+                    continue
+
+                responsible_list_str = "\n- " + "\n- ".join(responsible_names)
+                email_body = (
+                    f"Hi Team,\n\n"
+                    f"For the team {team_name}, the members who are responsible for ball collection within the next 7 days are:{responsible_list_str}\n\n"
+                    f"Please support them as needed!"
+                )
+
+                # 5. Simulate sending email
+                if to_emails: # Only attempt to send if there are 'To' recipients
+                    print(f"--- SIMULATING EMAIL SEND FOR TEAM: {team_name} ({current_team_id}) ---")
+                    print(f"To: {', '.join(to_emails)}")
+                    if cc_emails:
+                        print(f"CC: {', '.join(cc_emails)}")
+                    print(f"Subject: {email_request.subject}")
+                    print(f"Body:\n{email_body}\n")
+                    print(f"--- END SIMULATION ---")
+                    sent_emails_count += 1
+                else:
+                    failed_emails.append({"team_id": current_team_id, "reason": "No valid 'To' recipients for this team's email."})
+
+            except HTTPException as e:
+                failed_emails.append({
+                    "team_id": current_team_id,
+                    "reason": f"Error processing team {current_team_id}: {e.detail}"
+                })
+            except httpx.RequestError as e:
+                failed_emails.append({
+                    "team_id": current_team_id,
+                    "reason": f"Could not connect to Team Members Service for team {current_team_id}: {e}"
+                })
+            except Exception as e:
+                failed_emails.append({
+                    "team_id": current_team_id,
+                    "reason": f"An unexpected error occurred for team {current_team_id}: {e}"
+                })
+
+    response_message = f"Successfully simulated sending emails for {sent_emails_count} teams."
+    if failed_emails:
+        response_message += f" Failed to process or send emails for some members/teams."
+        return {
+            "message": response_message,
+            "sent_team_emails_count": sent_emails_count,
+            "failed_details": failed_emails
+        }
+    
+    return {
+        "message": response_message,
+        "sent_team_emails_count": sent_emails_count,
+        "failed_details": []
+    }
+
 
 app.include_router(v1_router)
