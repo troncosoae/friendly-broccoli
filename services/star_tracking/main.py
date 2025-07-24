@@ -11,7 +11,7 @@ import csv
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, APIRouter, Response
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, validator
 import httpx
 
 # Load environment variables
@@ -91,6 +91,18 @@ class StarAssignmentResponse(BaseModel):
 
 class EmailRequest(BaseModel):
     subject: str = Field(..., description="Subject of the email.")
+
+# New models for batch star assignment
+class BatchStarAssignmentCreate(BaseModel):
+    star_session_id: str = Field(..., description="The ID of the star session to which these assignments belong.")
+    assignments: Dict[str, bool] = Field(..., description="A dictionary where keys are team_member_ids and values are booleans indicating if they won a star.")
+
+class BatchStarAssignmentResponse(BaseModel):
+    message: str
+    created_assignments_count: int
+    assignments: List[StarAssignmentInDB]
+    warnings: List[str]
+
 
 # --- Startup Event ---
 @app.on_event("startup")
@@ -236,6 +248,85 @@ async def create_star_assignment(assignment: StarAssignmentCreate):
         warning=warning_message
     )
 
+@v1_router.post("/star-assignments/batch-create", response_model=BatchStarAssignmentResponse, status_code=status.HTTP_201_CREATED,
+            summary="Create star assignments in a batch",
+            description="Creates multiple star assignments for a single star session. The input is a dictionary of team member IDs and a boolean indicating if they won a star.")
+async def create_batch_star_assignments(batch_request: BatchStarAssignmentCreate):
+    """
+    Creates multiple star assignments for a single star session in a batch.
+
+    - **star_session_id**: The ID of the star session.
+    - **assignments**: A dictionary where keys are team_member_ids and values are booleans.
+    """
+    # 1. Validate Star Session
+    session = await star_sessions_collection.find_one({"id": batch_request.star_session_id})
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Star session not found.")
+    
+    session_team_id = session["team_id"]
+
+    # 2. Get all team members for validation
+    team_members = await _get_team_members(session_team_id)
+    team_member_ids_in_team = {member["id"] for member in team_members}
+
+    # 3. Process assignments
+    assignments_to_create = []
+    warnings = []
+    
+    # The dictionary keys are unique, so no need to check for duplicates in the payload.
+    for member_id, won_star in batch_request.assignments.items():
+        if not won_star:
+            continue # Skip members who didn't win a star
+
+        # Validate that the member belongs to the team
+        if member_id not in team_member_ids_in_team:
+            warnings.append(f"Team member with ID '{member_id}' does not belong to the session's team and was skipped.")
+            continue
+
+        # Check for existing assignments for this player in this session
+        existing_assignments_count = await star_assignments_collection.count_documents({
+            "star_session_id": batch_request.star_session_id,
+            "team_member_id": member_id
+        })
+        if existing_assignments_count > 0:
+            warnings.append(f"Team member '{member_id}' already had assignments in this session. A new one was added.")
+
+        # Prepare the new assignment document
+        assignment_id = str(uuid.uuid4())
+        assignment_data = {
+            "id": assignment_id,
+            "star_session_id": batch_request.star_session_id,
+            "team_member_id": member_id,
+            "star_count": 1.0, # Defaulting to 1 star as per boolean logic
+            "created_at": datetime.utcnow(),
+        }
+        assignments_to_create.append(assignment_data)
+
+    # 4. Database Insertion
+    if not assignments_to_create:
+        # This can happen if all `won_star` are false or all members are invalid.
+        # Returning a 201 with a message is better than a 400 error.
+        return BatchStarAssignmentResponse(
+            message="No new assignments were created. This may be because no members were marked as winners or members were not part of the team.",
+            created_assignments_count=0,
+            assignments=[],
+            warnings=warnings
+        )
+
+    await star_assignments_collection.insert_many(assignments_to_create)
+
+    # 5. Fetch created assignments and return response
+    created_ids = [d["id"] for d in assignments_to_create]
+    created_assignments_cursor = star_assignments_collection.find({"id": {"$in": created_ids}})
+    created_assignments_list = await created_assignments_cursor.to_list(length=None)
+
+    return BatchStarAssignmentResponse(
+        message=f"Successfully created {len(created_assignments_list)} star assignments.",
+        created_assignments_count=len(created_assignments_list),
+        assignments=[StarAssignmentInDB(**a) for a in created_assignments_list],
+        warnings=warnings
+    )
+
 @v1_router.get("/star-assignments", response_model=List[StarAssignmentInDB])
 async def get_star_assignments(session_id: Optional[str] = None, team_member_id: Optional[str] = None):
     """Retrieves all star assignments, optionally filtered by session or team member."""
@@ -339,7 +430,7 @@ async def download_stars_csv(team_id: str, start_date: date, end_date: date):
     sorted_sessions = sorted(sessions, key=lambda s: s['session_date'])
     sorted_session_ids = [s['id'] for s in sorted_sessions]
     
-    header = ["Team Member"] + [session_map[sid] for sid in sorted_session_ids]
+    header = ["Team Member"] + [session_map[sid] for sid in sorted_session_ids] + ["Total Stars"]
     writer = csv.writer(output)
     writer.writerow(header)
     
@@ -347,6 +438,7 @@ async def download_stars_csv(team_id: str, start_date: date, end_date: date):
         row = [member["name"]]
         for session_id in sorted_session_ids:
             row.append(report_data[member["id"]].get(session_id, 0))
+        row.append(sum(row[1:]))
         writer.writerow(row)
 
     output.seek(0)

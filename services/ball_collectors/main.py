@@ -6,6 +6,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import itertools
+import random
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, APIRouter
@@ -344,6 +345,8 @@ async def create_batch_ball_collections(batch_request: BatchBallCollectionCreate
 
     # 3. Rotation and Assignment Logic
     new_assignments_data = []
+    # Suffle the members to ensure random assignment each time
+    random.shuffle(team_members)  # Shuffle to ensure random assignment each time
     # Use itertools.cycle for continuous, easy rotation of members
     member_cycler = itertools.cycle(team_members)
     
