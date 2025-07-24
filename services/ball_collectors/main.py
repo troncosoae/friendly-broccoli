@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import os
 import uuid
 from typing import List, Dict, Optional, Set
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import itertools
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, APIRouter
@@ -94,6 +95,19 @@ class BallCollectionInDB(BallCollectionBase):
 # New Pydantic model for email request (body is now dynamically generated)
 class UpcomingBallCollectionEmailRequest(BaseModel):
     subject: str = Field(..., description="Subject of the email.")
+
+# New Pydantic models for batch creation
+class BatchBallCollectionCreate(BaseModel):
+    team_id: str = Field(..., description="ID of the team to create responsibilities for.")
+    members_per_week: int = Field(..., gt=0, description="Number of members to assign per week.")
+    start_date: date = Field(..., description="The start date for creating assignments (inclusive).")
+    end_date: date = Field(..., description="The end date for creating assignments (inclusive).")
+
+class BatchBallCollectionResponse(BaseModel):
+    message: str
+    created_assignments_count: int
+    assignments: List[BallCollectionInDB]
+    email_status: str
 
 @app.on_event("startup")
 async def startup_event():
@@ -296,6 +310,129 @@ async def create_ball_collection(ball_collection: BallCollectionCreate):
     await ball_collectors_collection.insert_one(assignment_data)
     created_assignment = await ball_collectors_collection.find_one({"id": assignment_id})
     return BallCollectionInDB(**created_assignment)
+
+@v1_router.post("/ball-collections/batch-create", response_model=BatchBallCollectionResponse, status_code=status.HTTP_201_CREATED,
+            summary="Create a batch of ball collection responsibilities for a team",
+            description="Generates weekly ball collection assignments for a team over a specified period and notifies all team members via email.")
+async def create_batch_ball_collections(batch_request: BatchBallCollectionCreate):
+    """
+    Creates ball collection responsibilities in weekly batches for a team.
+
+    - **team_id**: The ID of the team for which to create assignments.
+    - **members_per_week**: The number of members assigned per week.
+    - **start_date**: The start date for the assignment period.
+    - **end_date**: The end date for the assignment period.
+    """
+    # 1. Validate input
+    team_id = batch_request.team_id
+    team_data = await _validate_team_exists(team_id)
+    team_name = team_data.get("name", f"Team {team_id}")
+
+    if batch_request.start_date >= batch_request.end_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="End date must be after start date."
+        )
+
+    # 2. Fetch team members
+    team_members = await _get_team_members(team_id)
+    if not team_members:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No members found for team with ID '{team_id}'. Cannot create assignments."
+        )
+
+    # 3. Rotation and Assignment Logic
+    new_assignments_data = []
+    # Use itertools.cycle for continuous, easy rotation of members
+    member_cycler = itertools.cycle(team_members)
+    
+    current_date = batch_request.start_date
+    while current_date <= batch_request.end_date:
+        # Define the week's start and end datetimes
+        week_start_dt = datetime.combine(current_date, datetime.min.time())
+        # The responsibility ends at the end of the 6th day (start of 7th day)
+        week_end_dt = week_start_dt + timedelta(days=7)
+
+        # Assign members for this week
+        for _ in range(batch_request.members_per_week):
+            responsible_member = next(member_cycler)
+            member_id = responsible_member["id"]
+            
+            assignment_id = str(uuid.uuid4())
+            assignment_data = {
+                "id": assignment_id,
+                "responsible_id": member_id,
+                "team_id": team_id,
+                "start_date": week_start_dt,
+                "end_date": week_end_dt,
+                "assigned_date": datetime.utcnow(),
+                "created_at": datetime.utcnow(),
+                "updated_at": None,
+            }
+            new_assignments_data.append(assignment_data)
+
+        # Move to the next week
+        current_date += timedelta(weeks=1)
+
+    if not new_assignments_data:
+        return BatchBallCollectionResponse(
+            message="No assignments were needed for the given date range.",
+            created_assignments_count=0,
+            assignments=[],
+            email_status="not_sent"
+        )
+
+    # 4. Database Insertion
+    await ball_collectors_collection.insert_many(new_assignments_data)
+    
+    # Fetch the created assignments to return them in the response
+    created_ids = [d["id"] for d in new_assignments_data]
+    created_assignments_cursor = ball_collectors_collection.find({"id": {"$in": created_ids}})
+    created_assignments_list = await created_assignments_cursor.to_list(length=None)
+    
+    # 5. Email Logic
+    all_member_emails = [m["email"] for m in team_members if m.get("email")]
+    member_details_map = {m["id"]: m for m in team_members}
+
+    # Prepare email body with a summary of assignments
+    email_body = f"Hi Team {team_name},\n\nNew ball collection responsibilities have been assigned as follows:\n\n"
+    
+    # Group assignments by week for a clean email format
+    assignments_by_week = {}
+    for assignment in created_assignments_list:
+        week_start_str = assignment['start_date'].strftime('%Y-%m-%d')
+        if week_start_str not in assignments_by_week:
+            assignments_by_week[week_start_str] = []
+        
+        responsible_member_name = member_details_map.get(assignment['responsible_id'], {}).get('name', 'Unknown Member')
+        assignments_by_week[week_start_str].append(responsible_member_name)
+
+    for week_start_str, names in sorted(assignments_by_week.items()):
+        email_body += f"Week of {week_start_str}:\n"
+        for name in names:
+            email_body += f"- {name}\n"
+        email_body += "\n"
+
+    email_body += "Thank you,\nTeam Admin"
+
+    # Send the email
+    email_status = "not_sent"
+    if all_member_emails:
+        email_sent = await _send_email(
+            to_addrs=all_member_emails,
+            cc_addrs=[], # Sending to all, so no CC needed
+            subject=f"New Ball Collection Schedule for {team_name}",
+            body=email_body
+        )
+        email_status = "sent_successfully" if email_sent else "send_failed"
+
+    return BatchBallCollectionResponse(
+        message=f"Successfully created {len(created_assignments_list)} new ball collection assignments for {team_name}.",
+        created_assignments_count=len(created_assignments_list),
+        assignments=[BallCollectionInDB(**a) for a in created_assignments_list],
+        email_status=email_status
+    )
 
 @v1_router.get("/ball-collections", response_model=List[BallCollectionInDB],
             summary="Get all ball collection assignments",
