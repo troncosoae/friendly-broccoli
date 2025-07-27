@@ -10,6 +10,7 @@ import random
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, APIRouter
+from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, ValidationError
 import httpx # Import httpx for making asynchronous HTTP requests
@@ -43,6 +44,10 @@ if not SENDER_EMAIL:
 if not SENDER_EMAIL_PASSWORD:
     print("Warning: SENDER_EMAIL_PASSWORD environment variable is not set. Email sending will not work.")
 
+CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", None) # Default to '*' if not set
+if CORS_ALLOWED_ORIGINS is None:
+    print("Warning: CORS_ALLOWED_ORIGINS is set to '*'. This allows all origins, which may not be secure in production.")
+
 
 # Collection names (ensure these match your main.py if you're using shared DB)
 BALL_COLLECTORS_COLLECTION = "ball_collectors"
@@ -58,6 +63,15 @@ VERSION = "1.0.0"
 app = FastAPI(
     title="Ball Collectors Service",
     description="Manages ball collection responsibilities for teams and team members."
+)
+
+origins = CORS_ALLOWED_ORIGINS.split(",") if CORS_ALLOWED_ORIGINS else ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Allow all origins if '*' or specific origins if set
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],  # Allow all headers
 )
 
 v1_router = APIRouter(prefix="/v1", tags=["v1"])

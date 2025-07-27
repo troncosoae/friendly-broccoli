@@ -10,6 +10,7 @@ import csv
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, APIRouter, Response
+from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr, validator
 import httpx
@@ -40,6 +41,10 @@ if TEAM_MEMBERS_SERVICE_URL == DEFAULT_TEAM_MEMBERS_SERVICE_URL:
 if not SENDER_EMAIL or not SENDER_EMAIL_PASSWORD:
     print("Warning: SENDER_EMAIL or SENDER_EMAIL_PASSWORD not set. Email sending will be disabled.")
 
+CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", None) # Default to '*' if not set
+if CORS_ALLOWED_ORIGINS is None:
+    print("Warning: CORS_ALLOWED_ORIGINS is set to '*'. This allows all origins, which may not be secure in production.")
+
 # --- Collection Names ---
 STAR_SESSIONS_COLLECTION = "star_sessions"
 STAR_ASSIGNMENTS_COLLECTION = "star_assignments"
@@ -51,6 +56,16 @@ app = FastAPI(
     title="Star Tracking Service",
     description="Manages star assignments for team members."
 )
+
+origins = CORS_ALLOWED_ORIGINS.split(",") if CORS_ALLOWED_ORIGINS else ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Allow all origins if '*' or specific origins if set
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
+
 v1_router = APIRouter(prefix="/v1", tags=["v1"])
 
 # --- Database Client Initialization ---

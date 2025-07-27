@@ -6,6 +6,7 @@ import uuid
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status, Query, APIRouter
+from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field, BeforeValidator
 from typing_extensions import Annotated
@@ -25,6 +26,10 @@ if (MONGODB_URI == DEFAULT_MONGODB_URI):
 if (DB_NAME == DEFAULT_DB_NAME):
     print(f"Warning: Using default DB name '{DB_NAME}'. Ensure this is correct for your environment.")
 
+CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", None) # Default to '*' if not set
+if CORS_ALLOWED_ORIGINS is None:
+    print("Warning: CORS_ALLOWED_ORIGINS is set to '*'. This allows all origins, which may not be secure in production.")
+
 TEAM_COLLECTION = "teams"
 TEAM_MEMBERS_COLLECTION = "team_members"
 COACH_COLLECTION = "coaches"
@@ -36,6 +41,16 @@ VERSION = "1.0.0"
 app = FastAPI(
     title="Team, Team Members, and Coaches Service",
     description="Manages team, team member, and coach information."
+)
+
+
+origins = CORS_ALLOWED_ORIGINS.split(",") if CORS_ALLOWED_ORIGINS else ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Allow all origins if '*' or specific origins if set
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],  # Allow all headers
 )
 
 v1_router = APIRouter(prefix="/v1", tags=["v1"])
