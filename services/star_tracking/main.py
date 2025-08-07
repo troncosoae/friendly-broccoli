@@ -111,6 +111,7 @@ class EmailRequest(BaseModel):
 class BatchStarAssignmentCreate(BaseModel):
     star_session_id: str = Field(..., description="The ID of the star session to which these assignments belong.")
     assignments: Dict[str, bool] = Field(..., description="A dictionary where keys are team_member_ids and values are booleans indicating if they won a star.")
+    disable_double_assignments: Optional[bool] = Field(False, description="If true, prevents double assignments for the same team member in the same session.")
 
 class BatchStarAssignmentResponse(BaseModel):
     message: str
@@ -304,7 +305,7 @@ async def create_batch_star_assignments(batch_request: BatchStarAssignmentCreate
             "team_member_id": member_id
         })
         if existing_assignments_count > 0:
-            warnings.append(f"Team member '{member_id}' already had assignments in this session. A new one was added.")
+            warnings.append(f"Team member '{member_id}' already had assignments in this session.")
 
         # Prepare the new assignment document
         assignment_id = str(uuid.uuid4())
@@ -315,6 +316,10 @@ async def create_batch_star_assignments(batch_request: BatchStarAssignmentCreate
             "star_count": 1.0, # Defaulting to 1 star as per boolean logic
             "created_at": datetime.utcnow(),
         }
+        if batch_request.disable_double_assignments and existing_assignments_count > 0:
+            # If double assignments are disabled, skip this member
+            warnings.append(f"Double assignment for team member '{member_id}' is disabled. Skipping this assignment.")
+            continue
         assignments_to_create.append(assignment_data)
 
     # 4. Database Insertion
